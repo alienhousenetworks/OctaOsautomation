@@ -123,6 +123,74 @@ export default function EnterpriseView({ token }: { token: string }) {
     load();
   };
 
+  const loadRazorpayScript = (): Promise<boolean> =>
+    new Promise((resolve) => {
+      if (typeof window !== 'undefined' && (window as any).Razorpay) {
+        resolve(true);
+        return;
+      }
+      const s = document.createElement('script');
+      s.src = 'https://checkout.razorpay.com/v1/checkout.js';
+      s.onload = () => resolve(true);
+      s.onerror = () => resolve(false);
+      document.body.appendChild(s);
+    });
+
+  const payWithRazorpay = async (planCode: string) => {
+    setMessage('');
+    try {
+      const orderRes = await fetch(`${API_URL}/enterprise/billing/razorpay/create-order`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ plan_code: planCode }),
+      });
+      if (!orderRes.ok) {
+        setMessage(await orderRes.text());
+        return;
+      }
+      const order = await orderRes.json();
+      const ok = await loadRazorpayScript();
+      if (!ok) {
+        setMessage('Failed to load Razorpay checkout script');
+        return;
+      }
+      const rzp = new (window as any).Razorpay({
+        key: order.key_id,
+        amount: order.amount_paise,
+        currency: order.currency,
+        name: order.name || 'OctaOS',
+        description: order.description,
+        order_id: order.razorpay_order_id,
+        prefill: order.prefill || {},
+        notes: order.notes || {},
+        theme: order.theme || { color: '#8b5cf6' },
+        handler: async (response: any) => {
+          const v = await fetch(`${API_URL}/enterprise/billing/razorpay/verify`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+            }),
+          });
+          if (v.ok) {
+            setMessage(`Payment successful — plan ${planCode} activated`);
+            load();
+          } else {
+            setMessage(await v.text());
+          }
+        },
+      });
+      rzp.on('payment.failed', (resp: any) => {
+        setMessage(resp?.error?.description || 'Payment failed');
+      });
+      rzp.open();
+    } catch (e: any) {
+      setMessage(e.message || 'Razorpay error');
+    }
+  };
+
   const gdpr = async (type: 'export' | 'delete') => {
     const r = await fetch(`${API_URL}/enterprise/compliance/gdpr/${type}`, {
       method: 'POST',
@@ -267,10 +335,23 @@ export default function EnterpriseView({ token }: { token: string }) {
                   ${p.price_usd_monthly}/mo · ₹{p.price_inr_monthly}/mo
                 </div>
                 <div className="text-[11px] text-zinc-400">Agents: {(p.allowed_agents || []).join(', ')}</div>
-                <Button size="sm" onClick={() => changePlan(p.code)}>Select</Button>
+                <div className="flex flex-wrap gap-2">
+                  {p.code !== 'enterprise' && (
+                    <Button size="sm" onClick={() => payWithRazorpay(p.code)}>
+                      Pay with Razorpay (₹)
+                    </Button>
+                  )}
+                  <Button size="sm" variant="outline" onClick={() => changePlan(p.code)}>
+                    Select free (admin)
+                  </Button>
+                </div>
               </Card>
             ))}
           </div>
+          <p className="text-[11px] text-muted-foreground">
+            Payments use Razorpay (INR). Set RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET in server .env.
+            Enterprise plan is custom invoicing.
+          </p>
         </div>
       )}
 

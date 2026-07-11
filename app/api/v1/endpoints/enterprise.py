@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,7 @@ from app.core.rbac import Action, Resource, require_permission
 from app.models.base import User
 from app.services.policy_engine import PolicyEngine
 from app.services.subscription_service import SubscriptionService
+from app.services.razorpay_service import RazorpayNotConfigured, RazorpayService
 from app.services.compliance_service import ComplianceService
 from app.services.crm_sync import CRMSyncService
 from app.services.kb_rag import KnowledgeRAGService
@@ -59,6 +60,16 @@ class EvaluateAction(BaseModel):
 
 class PlanChange(BaseModel):
     plan_code: str
+
+
+class RazorpayCreateOrder(BaseModel):
+    plan_code: str
+
+
+class RazorpayVerifyPayment(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
 
 
 class BudgetCapUpdate(BaseModel):
@@ -254,13 +265,112 @@ def change_plan(
     body: PlanChange,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
-    _: User = Depends(require_permission(Resource.SETTINGS, Action.UPDATE)),
+    user: User = Depends(require_permission(Resource.SETTINGS, Action.UPDATE)),
 ):
+    """
+    Admin free plan switch. When RAZORPAY_REQUIRE_PAYMENT=true, non-superusers
+    must pay via /billing/razorpay/* instead.
+    """
+    from app.core.config import settings as app_settings
+
+    if (
+        app_settings.RAZORPAY_REQUIRE_PAYMENT
+        and not getattr(user, "is_system_admin", False)
+        and not getattr(user, "is_superuser", False)
+    ):
+        raise HTTPException(
+            402,
+            "Payment required. Use Razorpay checkout: POST /enterprise/billing/razorpay/create-order",
+        )
     try:
-        sub = SubscriptionService(db).change_plan(tenant_id, body.plan_code)
+        SubscriptionService(db).change_plan(tenant_id, body.plan_code)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return SubscriptionService(db).entitlements(tenant_id)
+
+
+@router.get("/billing/payments/config")
+def payment_config(db: Session = Depends(deps.get_db)):
+    """Public-ish config for checkout (key_id only). Auth still required for tenant context."""
+    return RazorpayService(db).public_config()
+
+
+@router.post("/billing/razorpay/create-order")
+def razorpay_create_order(
+    body: RazorpayCreateOrder,
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    user: User = Depends(require_permission(Resource.SETTINGS, Action.UPDATE)),
+):
+    try:
+        return RazorpayService(db).create_order_for_plan(
+            tenant_id=tenant_id, plan_code=body.plan_code, user=user
+        )
+    except RazorpayNotConfigured as e:
+        raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+
+
+@router.post("/billing/razorpay/verify")
+def razorpay_verify(
+    body: RazorpayVerifyPayment,
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    user: User = Depends(require_permission(Resource.SETTINGS, Action.UPDATE)),
+):
+    try:
+        return RazorpayService(db).verify_and_activate(
+            tenant_id=tenant_id,
+            razorpay_order_id=body.razorpay_order_id,
+            razorpay_payment_id=body.razorpay_payment_id,
+            razorpay_signature=body.razorpay_signature,
+            user=user,
+        )
+    except RazorpayNotConfigured as e:
+        raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/billing/razorpay/webhook")
+async def razorpay_webhook(
+    request: Request,
+    db: Session = Depends(deps.get_db),
+):
+    """Razorpay server webhook — configure URL in Razorpay dashboard."""
+    raw = await request.body()
+    sig = request.headers.get("X-Razorpay-Signature")
+    try:
+        return RazorpayService(db).handle_webhook(raw, sig)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/billing/orders")
+def list_payment_orders(
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.READ)),
+    limit: int = 20,
+):
+    orders = RazorpayService(db).list_orders(tenant_id, limit=limit)
+    return [
+        {
+            "id": o.id,
+            "plan_code": o.plan_code,
+            "amount": o.amount,
+            "currency": o.currency,
+            "status": o.status,
+            "razorpay_order_id": o.razorpay_order_id,
+            "razorpay_payment_id": o.razorpay_payment_id,
+            "paid_at": o.paid_at,
+            "created_at": o.created_at,
+        }
+        for o in orders
+    ]
 
 
 @router.get("/billing/budget")

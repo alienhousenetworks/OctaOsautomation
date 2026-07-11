@@ -198,6 +198,11 @@ class SubscriptionService:
             "feature_flags": flags,
             "trial_ends_at": sub.trial_ends_at.isoformat() if sub.trial_ends_at else None,
             "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+            "payment": {
+                "provider": "razorpay",
+                "last_payment_id": getattr(sub, "razorpay_last_payment_id", None),
+                "last_order_id": getattr(sub, "razorpay_last_order_id", None),
+            },
         }
 
     def _period_key(self) -> str:

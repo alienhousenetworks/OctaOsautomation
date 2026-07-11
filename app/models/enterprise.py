@@ -107,12 +107,38 @@ class TenantSubscription(Base):
     status = Column(String, default="trialing")  # trialing, active, past_due, canceled, expired
     stripe_customer_id = Column(String, nullable=True)
     stripe_subscription_id = Column(String, nullable=True)
+    razorpay_customer_id = Column(String, nullable=True)
+    razorpay_subscription_id = Column(String, nullable=True)
+    razorpay_last_payment_id = Column(String, nullable=True)
+    razorpay_last_order_id = Column(String, nullable=True)
     trial_ends_at = Column(DateTime(timezone=True), nullable=True)
     current_period_start = Column(DateTime(timezone=True), nullable=True)
     current_period_end = Column(DateTime(timezone=True), nullable=True)
     seats_used = Column(Integer, default=1)
     actions_used_period = Column(Integer, default=0)
     feature_overrides = Column(JSON, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PaymentOrder(Base):
+    """Razorpay (or other) checkout orders for plan purchases."""
+    __tablename__ = "payment_orders"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    plan_code = Column(String, nullable=False)
+    provider = Column(String, default="razorpay")  # razorpay | stripe
+    amount = Column(Float, nullable=False)  # major units (INR rupees / USD dollars)
+    amount_paise = Column(Integer, nullable=False)  # minor units for Razorpay
+    currency = Column(String, default="INR")
+    status = Column(String, default="created")  # created, paid, failed, expired
+    razorpay_order_id = Column(String, nullable=True, unique=True, index=True)
+    razorpay_payment_id = Column(String, nullable=True, index=True)
+    razorpay_signature = Column(String, nullable=True)
+    receipt = Column(String, nullable=True)
+    notes = Column(JSON, default=dict)
+    paid_at = Column(DateTime(timezone=True), nullable=True)
+    created_by = Column(String, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

@@ -62,12 +62,21 @@ class Settings(BaseSettings):
     # OPTIONAL
     PINTEREST_ACCESS_TOKEN: Optional[str] = None
 
-    # Stripe (subscription engine)
+    # Stripe (optional / legacy)
     STRIPE_SECRET_KEY: Optional[str] = None
     STRIPE_WEBHOOK_SECRET: Optional[str] = None
     STRIPE_PRICE_STARTER: Optional[str] = None
     STRIPE_PRICE_GROWTH: Optional[str] = None
     STRIPE_PRICE_BUSINESS: Optional[str] = None
+
+    # Razorpay (primary payments — India)
+    RAZORPAY_KEY_ID: Optional[str] = None
+    RAZORPAY_KEY_SECRET: Optional[str] = None
+    RAZORPAY_WEBHOOK_SECRET: Optional[str] = None
+    # Currency for checkout: INR recommended for Razorpay
+    RAZORPAY_CURRENCY: str = "INR"
+    # If true, /billing/plan requires a paid Razorpay receipt (admins can still force)
+    RAZORPAY_REQUIRE_PAYMENT: bool = False
 
     # SSO (OIDC) optional
     OIDC_CLIENT_ID: Optional[str] = None
