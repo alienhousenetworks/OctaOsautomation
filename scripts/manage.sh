@@ -29,12 +29,37 @@ case "$1" in
     # Equivalent to Django's `python manage.py migrate`
     # It applies all pending migrations to the database
     echo "Applying pending migrations to the database..."
-    "$VENV_DIR/bin/alembic" upgrade head
+    # Use `heads` so a temporary multi-head graph still applies (merge if needed).
+    # Prefer single `head` when graph is linear.
+    HEADS_COUNT=$("$VENV_DIR/bin/alembic" heads 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "${HEADS_COUNT:-0}" -gt 1 ]]; then
+      echo "WARNING: multiple Alembic heads detected ($HEADS_COUNT). Upgrading all heads."
+      echo "Heads:"
+      "$VENV_DIR/bin/alembic" heads || true
+      "$VENV_DIR/bin/alembic" upgrade heads
+    else
+      "$VENV_DIR/bin/alembic" upgrade head
+    fi
+    ;;
+
+  heads)
+    "$VENV_DIR/bin/alembic" heads -v
+    ;;
+
+  current)
+    "$VENV_DIR/bin/alembic" current -v
+    ;;
+
+  history)
+    "$VENV_DIR/bin/alembic" history
     ;;
     
   *)
     echo "Usage:"
     echo "  bash scripts/manage.sh makemigrations [optional_description_with_no_spaces]"
     echo "  bash scripts/manage.sh migrate"
+    echo "  bash scripts/manage.sh heads"
+    echo "  bash scripts/manage.sh current"
+    echo "  bash scripts/manage.sh history"
     ;;
 esac

@@ -93,15 +93,33 @@ if [[ -d "$VENV_DIR" ]]; then
   if [[ -f "$APP_DIR/cleanup_tenants.py" ]]; then
     "$VENV_DIR/bin/python3" "$APP_DIR/cleanup_tenants.py" || warn "cleanup_tenants.py failed"
   fi
-  
-  info "Generating new migrations if models changed..."
+
+  # IMPORTANT: Do NOT autogenerate migrations on the VPS.
+  # `alembic revision --autogenerate` on production creates local-only revision
+  # files that fork the graph → "Multiple head revisions" on the next deploy.
+  # Migrations are authored in git and applied here only.
   chmod +x "$SCRIPT_DIR/manage.sh"
-  "$SCRIPT_DIR/manage.sh" makemigrations "auto_deploy_update" || warn "makemigrations had warnings or no changes"
-  
-  info "Applying database migrations..."
+
+  # Drop untracked auto-generated migration junk from older deploys (keep git-tracked only)
+  if [[ -d "$APP_DIR/alembic/versions" ]]; then
+    info "Checking for untracked local Alembic revisions..."
+    while IFS= read -r -d '' f; do
+      warn "Removing untracked local migration (not in git): $f"
+      rm -f "$f"
+    done < <(cd "$APP_DIR" && git ls-files --others --exclude-standard 'alembic/versions/*.py' -z 2>/dev/null || true)
+  fi
+
+  info "Alembic heads before migrate:"
+  "$SCRIPT_DIR/manage.sh" heads || true
+  info "Alembic current DB revision:"
+  "$SCRIPT_DIR/manage.sh" current || true
+
+  info "Applying database migrations from git..."
   "$SCRIPT_DIR/manage.sh" migrate || error "Migrations failed!"
-  
-  "$VENV_DIR/bin/python3" "$APP_DIR/init_db.py" || warn "init_db.py had warnings (may be safe to ignore)"
+
+  if [[ -f "$APP_DIR/init_db.py" ]]; then
+    "$VENV_DIR/bin/python3" "$APP_DIR/init_db.py" || warn "init_db.py had warnings (may be safe to ignore)"
+  fi
   success "Database migrations completed"
 else
   error "Virtualenv not found at $VENV_DIR. Please run deploy.sh first."
