@@ -79,12 +79,16 @@ class RateLimiter:
                     detail="Rate limit exceeded. Please try again later."
                 )
 
-def rate_limit_endpoint(limit: int = 100, window_seconds: int = 60):
+def rate_limit_endpoint(limit: int = None, window_seconds: int = 60):
     """
     FastAPI dependency helper to apply rate limiting.
     Differentiates by tenant if tenant_id exists, otherwise falls back to IP.
+    Default limit is high (TENANT_API_RATE_LIMIT_PER_MINUTE) so users can explore freely.
     """
     def dependency(request: Request) -> None:
+        eff_limit = limit if limit is not None else getattr(
+            settings, "TENANT_API_RATE_LIMIT_PER_MINUTE", 300
+        )
         # Resolve identifier: prefer tenant_id header, fallback to client IP
         tenant_id = request.headers.get("X-Tenant-ID") or "anonymous"
         client_ip = request.client.host if request.client else "unknown-ip"
@@ -93,6 +97,42 @@ def rate_limit_endpoint(limit: int = 100, window_seconds: int = 60):
         path = request.url.path
         key_identifier = f"{tenant_id}:{client_ip}:{path}"
         
-        RateLimiter.check_rate_limit(key_identifier, limit, window_seconds)
+        RateLimiter.check_rate_limit(key_identifier, eff_limit, window_seconds)
         
+    return dependency
+
+
+def tenant_action_rate_limit():
+    """
+    Dependency: enforce subscription weekly + monthly + lifetime action quotas
+    (high defaults on explorer plan). Use on heavy AI endpoints.
+    """
+    from app.api import deps
+    from app.services.subscription_service import SubscriptionService
+    from fastapi import Depends
+    from sqlalchemy.orm import Session
+
+    def dependency(
+        request: Request,
+        db: Session = Depends(deps.get_db),
+        current_user=Depends(deps.get_current_user),
+    ):
+        # Per-minute API burst (high)
+        tenant_id = current_user.tenant_id
+        client_ip = request.client.host if request.client else "unknown-ip"
+        per_min = getattr(settings, "TENANT_API_RATE_LIMIT_PER_MINUTE", 300)
+        RateLimiter.check_rate_limit(
+            f"tenant_api:{tenant_id}:{client_ip}",
+            limit=per_min,
+            window_seconds=60,
+        )
+        # Subscription quotas
+        check = SubscriptionService(db).check_action_allowed(tenant_id)
+        if not check.get("allowed"):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=check.get("reason") or "Action quota exceeded",
+            )
+        return check
+
     return dependency

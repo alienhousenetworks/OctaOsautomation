@@ -1,4 +1,4 @@
-"""Subscription plans, entitlements, seats, action quotas."""
+"""Subscription plans, entitlements, seats, action quotas (monthly + weekly + lifetime)."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -14,6 +14,9 @@ from app.models.enterprise import (
     TenantSubscription,
 )
 
+# Keep all plan definitions in code; only ACTIVE_PLAN_CODE is offered to users.
+ACTIVE_PLAN_CODE = "explorer"
+
 DEFAULT_PLANS = [
     {
         "code": "starter",
@@ -23,12 +26,15 @@ DEFAULT_PLANS = [
         "seat_limit": 3,
         "action_quota_monthly": 5000,
         "allowed_agents": ["sales", "support"],
+        "is_active": False,  # deactivated — keep code
         "feature_flags": {
             "crm_sync": False,
             "sso": False,
             "roi_pdf": False,
             "mfa": True,
             "approvals": True,
+            "weekly_action_quota": 1500,
+            "lifetime_action_quota": 50000,
         },
     },
     {
@@ -39,12 +45,15 @@ DEFAULT_PLANS = [
         "seat_limit": 15,
         "action_quota_monthly": 25000,
         "allowed_agents": ["sales", "marketing", "support", "hr"],
+        "is_active": False,
         "feature_flags": {
             "crm_sync": True,
             "sso": False,
             "roi_pdf": True,
             "mfa": True,
             "approvals": True,
+            "weekly_action_quota": 8000,
+            "lifetime_action_quota": 200000,
         },
     },
     {
@@ -55,6 +64,7 @@ DEFAULT_PLANS = [
         "seat_limit": 50,
         "action_quota_monthly": 100000,
         "allowed_agents": ["sales", "marketing", "support", "hr", "ceo", "finance"],
+        "is_active": False,
         "feature_flags": {
             "crm_sync": True,
             "sso": True,
@@ -62,6 +72,8 @@ DEFAULT_PLANS = [
             "mfa": True,
             "approvals": True,
             "audit_export": True,
+            "weekly_action_quota": 30000,
+            "lifetime_action_quota": 1000000,
         },
     },
     {
@@ -72,6 +84,7 @@ DEFAULT_PLANS = [
         "seat_limit": None,
         "action_quota_monthly": 500000,
         "allowed_agents": ["*"],
+        "is_active": False,
         "feature_flags": {
             "crm_sync": True,
             "sso": True,
@@ -81,6 +94,32 @@ DEFAULT_PLANS = [
             "audit_export": True,
             "dedicated_env": True,
             "sla": True,
+            "weekly_action_quota": 100000,
+            "lifetime_action_quota": None,
+        },
+    },
+    # Single active plan — full product access, high exploratory limits
+    {
+        "code": "explorer",
+        "name": "OctaOS Full Access",
+        "price_usd_monthly": 0.0,
+        "price_inr_monthly": 0.0,
+        "seat_limit": None,
+        "action_quota_monthly": 100000,  # monthly AI/actions ceiling (high)
+        "allowed_agents": ["*"],
+        "is_active": True,
+        "feature_flags": {
+            "crm_sync": True,
+            "sso": True,
+            "roi_pdf": True,
+            "mfa": True,
+            "approvals": True,
+            "audit_export": True,
+            "all_access": True,
+            "video_studio": False,  # in-app video creation hidden
+            "weekly_action_quota": 25000,  # high weekly room to explore
+            "lifetime_action_quota": 500000,  # total soft ceiling
+            "api_rate_limit_per_minute": 300,  # high request rate
         },
     },
 ]
@@ -93,18 +132,48 @@ class SubscriptionService:
     def seed_plans(self) -> List[SubscriptionPlan]:
         plans = []
         for p in DEFAULT_PLANS:
+            data = dict(p)
             existing = (
                 self.db.query(SubscriptionPlan)
-                .filter(SubscriptionPlan.code == p["code"])
+                .filter(SubscriptionPlan.code == data["code"])
                 .first()
             )
             if existing:
+                # Keep code, refresh active flags / quotas / agents from defaults
+                existing.name = data["name"]
+                existing.price_usd_monthly = data["price_usd_monthly"]
+                existing.price_inr_monthly = data.get("price_inr_monthly")
+                existing.seat_limit = data.get("seat_limit")
+                existing.action_quota_monthly = data.get("action_quota_monthly")
+                existing.allowed_agents = data.get("allowed_agents")
+                existing.feature_flags = data.get("feature_flags") or {}
+                existing.is_active = bool(data.get("is_active", False))
                 plans.append(existing)
                 continue
-            plan = SubscriptionPlan(**p)
+            plan = SubscriptionPlan(**data)
             self.db.add(plan)
             plans.append(plan)
         self.db.commit()
+
+        # Move any tenants still on a deactivated plan onto the active explorer plan
+        active = self.get_plan(ACTIVE_PLAN_CODE)
+        if active:
+            inactive_ids = [
+                p.id
+                for p in self.db.query(SubscriptionPlan)
+                .filter(SubscriptionPlan.is_active == False)  # noqa: E712
+                .all()
+            ]
+            if inactive_ids:
+                subs = (
+                    self.db.query(TenantSubscription)
+                    .filter(TenantSubscription.plan_id.in_(inactive_ids))
+                    .all()
+                )
+                for s in subs:
+                    s.plan_id = active.id
+                if subs:
+                    self.db.commit()
         return plans
 
     def get_plan(self, code: str) -> Optional[SubscriptionPlan]:
@@ -125,31 +194,41 @@ class SubscriptionService:
             .first()
         )
 
-    def ensure_trial(self, tenant_id: str, plan_code: str = "starter") -> TenantSubscription:
+    def ensure_trial(self, tenant_id: str, plan_code: str = None) -> TenantSubscription:
+        plan_code = plan_code or ACTIVE_PLAN_CODE
         existing = self.get_subscription(tenant_id)
         if existing:
+            # ensure still on an active plan
+            plan = self.db.query(SubscriptionPlan).filter(SubscriptionPlan.id == existing.plan_id).first()
+            if plan and not plan.is_active:
+                self.seed_plans()
+                active = self.get_plan(ACTIVE_PLAN_CODE)
+                if active:
+                    existing.plan_id = active.id
+                    self.db.commit()
+                    self.db.refresh(existing)
             return existing
         self.seed_plans()
-        plan = self.get_plan(plan_code) or self.get_plan("starter")
+        plan = self.get_plan(plan_code) or self.get_plan(ACTIVE_PLAN_CODE) or self.get_plan("starter")
         now = datetime.now(timezone.utc)
         sub = TenantSubscription(
             tenant_id=tenant_id,
             plan_id=plan.id,
-            status="trialing",
-            trial_ends_at=now + timedelta(days=14),
+            status="active",  # full access explorer — no paid gate for now
+            trial_ends_at=now + timedelta(days=365),
             current_period_start=now,
-            current_period_end=now + timedelta(days=14),
+            current_period_end=now + timedelta(days=30),
             seats_used=1,
             actions_used_period=0,
         )
         self.db.add(sub)
-        # default budget cap
         if not self.db.query(TenantBudgetCap).filter(TenantBudgetCap.tenant_id == tenant_id).first():
+            flags = plan.feature_flags or {}
             self.db.add(
                 TenantBudgetCap(
                     tenant_id=tenant_id,
-                    monthly_spend_usd=500.0,
-                    monthly_action_cap=plan.action_quota_monthly or 10000,
+                    monthly_spend_usd=float(flags.get("monthly_spend_usd") or 5000.0),
+                    monthly_action_cap=plan.action_quota_monthly or 100000,
                     hard_stop=True,
                 )
             )
@@ -162,6 +241,8 @@ class SubscriptionService:
         plan = self.get_plan(plan_code)
         if not plan:
             raise ValueError(f"Unknown plan: {plan_code}")
+        if not plan.is_active and plan_code != ACTIVE_PLAN_CODE:
+            raise ValueError(f"Plan '{plan_code}' is not available. Use '{ACTIVE_PLAN_CODE}'.")
         sub = self.ensure_trial(tenant_id)
         sub.plan_id = plan.id
         sub.status = "active"
@@ -172,15 +253,52 @@ class SubscriptionService:
         self.db.refresh(sub)
         return sub
 
+    def _counter(self, tenant_id: str, period_key: str) -> ActionUsageCounter:
+        counter = (
+            self.db.query(ActionUsageCounter)
+            .filter(
+                ActionUsageCounter.tenant_id == tenant_id,
+                ActionUsageCounter.period_key == period_key,
+            )
+            .first()
+        )
+        if not counter:
+            counter = ActionUsageCounter(
+                tenant_id=tenant_id, period_key=period_key, action_count=0, spend_usd=0.0
+            )
+            self.db.add(counter)
+            self.db.flush()
+        return counter
+
+    def _month_key(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m")
+
+    def _week_key(self) -> str:
+        # ISO week: 2026-W28
+        return datetime.now(timezone.utc).strftime("%Y-W%W")
+
+    def _lifetime_key(self) -> str:
+        return "lifetime"
+
     def entitlements(self, tenant_id: str) -> Dict[str, Any]:
         sub = self.ensure_trial(tenant_id)
         plan = self.db.query(SubscriptionPlan).filter(SubscriptionPlan.id == sub.plan_id).first()
         seats = self.db.query(User).filter(User.tenant_id == tenant_id, User.is_active == True).count()  # noqa: E712
         sub.seats_used = seats
+
+        month_c = self._counter(tenant_id, self._month_key())
+        week_c = self._counter(tenant_id, self._week_key())
+        life_c = self._counter(tenant_id, self._lifetime_key())
+        sub.actions_used_period = month_c.action_count or 0
         self.db.commit()
 
         flags = dict(plan.feature_flags or {})
         flags.update(sub.feature_overrides or {})
+        weekly_quota = int(flags.get("weekly_action_quota") or 25000)
+        lifetime_quota = flags.get("lifetime_action_quota")
+        if lifetime_quota is not None:
+            lifetime_quota = int(lifetime_quota)
+
         return {
             "tenant_id": tenant_id,
             "status": sub.status,
@@ -193,7 +311,11 @@ class SubscriptionService:
             "seat_limit": plan.seat_limit,
             "seats_used": seats,
             "action_quota_monthly": plan.action_quota_monthly,
-            "actions_used_period": sub.actions_used_period,
+            "actions_used_period": month_c.action_count or 0,
+            "actions_used_weekly": week_c.action_count or 0,
+            "weekly_action_quota": weekly_quota,
+            "actions_used_lifetime": life_c.action_count or 0,
+            "lifetime_action_quota": lifetime_quota,
             "allowed_agents": plan.allowed_agents,
             "feature_flags": flags,
             "trial_ends_at": sub.trial_ends_at.isoformat() if sub.trial_ends_at else None,
@@ -205,65 +327,92 @@ class SubscriptionService:
             },
         }
 
-    def _period_key(self) -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m")
-
     def check_action_allowed(self, tenant_id: str, cost_usd: float = 0.0) -> Dict[str, Any]:
         sub = self.ensure_trial(tenant_id)
         plan = self.db.query(SubscriptionPlan).filter(SubscriptionPlan.id == sub.plan_id).first()
+        flags = dict(plan.feature_flags or {})
         cap = (
             self.db.query(TenantBudgetCap)
             .filter(TenantBudgetCap.tenant_id == tenant_id)
             .first()
         )
-        counter = (
-            self.db.query(ActionUsageCounter)
-            .filter(
-                ActionUsageCounter.tenant_id == tenant_id,
-                ActionUsageCounter.period_key == self._period_key(),
-            )
-            .first()
-        )
-        used = counter.action_count if counter else 0
-        spend = counter.spend_usd if counter else 0.0
-        quota = plan.action_quota_monthly or 10000
-        if cap:
-            quota = min(quota, cap.monthly_action_cap or quota)
-            spend_cap = cap.monthly_spend_usd
-            hard = cap.hard_stop
-        else:
-            spend_cap = 999999.0
-            hard = False
 
-        if used >= quota and hard:
-            return {"allowed": False, "reason": "Action quota exceeded", "used": used, "quota": quota}
-        if spend + cost_usd > spend_cap and hard:
+        month_c = self._counter(tenant_id, self._month_key())
+        week_c = self._counter(tenant_id, self._week_key())
+        life_c = self._counter(tenant_id, self._lifetime_key())
+
+        used_m = month_c.action_count or 0
+        used_w = week_c.action_count or 0
+        used_l = life_c.action_count or 0
+        spend = month_c.spend_usd or 0.0
+
+        quota_m = plan.action_quota_monthly or 100000
+        quota_w = int(flags.get("weekly_action_quota") or 25000)
+        quota_l = flags.get("lifetime_action_quota")
+        if quota_l is not None:
+            quota_l = int(quota_l)
+
+        hard = True
+        spend_cap = 999999.0
+        if cap:
+            quota_m = min(quota_m, cap.monthly_action_cap or quota_m)
+            spend_cap = float(cap.monthly_spend_usd or spend_cap)
+            hard = bool(cap.hard_stop)
+
+        if hard and used_w >= quota_w:
+            return {
+                "allowed": False,
+                "reason": f"Weekly action limit reached ({used_w}/{quota_w})",
+                "used_weekly": used_w,
+                "quota_weekly": quota_w,
+                "used": used_m,
+                "quota": quota_m,
+            }
+        if hard and used_m >= quota_m:
+            return {
+                "allowed": False,
+                "reason": f"Monthly action limit reached ({used_m}/{quota_m})",
+                "used": used_m,
+                "quota": quota_m,
+                "used_weekly": used_w,
+                "quota_weekly": quota_w,
+            }
+        if hard and quota_l is not None and used_l >= quota_l:
+            return {
+                "allowed": False,
+                "reason": f"Total action limit reached ({used_l}/{quota_l})",
+                "used_lifetime": used_l,
+                "quota_lifetime": quota_l,
+            }
+        if hard and spend + cost_usd > spend_cap:
             return {
                 "allowed": False,
                 "reason": "Monthly spend budget exceeded",
                 "spend": spend,
                 "cap": spend_cap,
             }
-        return {"allowed": True, "used": used, "quota": quota, "spend": spend, "spend_cap": spend_cap}
+        return {
+            "allowed": True,
+            "used": used_m,
+            "quota": quota_m,
+            "used_weekly": used_w,
+            "quota_weekly": quota_w,
+            "used_lifetime": used_l,
+            "quota_lifetime": quota_l,
+            "spend": spend,
+            "spend_cap": spend_cap,
+        }
 
     def record_action(self, tenant_id: str, cost_usd: float = 0.0, count: int = 1) -> None:
-        pk = self._period_key()
-        counter = (
-            self.db.query(ActionUsageCounter)
-            .filter(
-                ActionUsageCounter.tenant_id == tenant_id,
-                ActionUsageCounter.period_key == pk,
-            )
-            .first()
-        )
-        if not counter:
-            counter = ActionUsageCounter(tenant_id=tenant_id, period_key=pk, action_count=0, spend_usd=0.0)
-            self.db.add(counter)
-        counter.action_count = (counter.action_count or 0) + count
-        counter.spend_usd = (counter.spend_usd or 0.0) + cost_usd
+        for pk in (self._month_key(), self._week_key(), self._lifetime_key()):
+            counter = self._counter(tenant_id, pk)
+            counter.action_count = (counter.action_count or 0) + count
+            if pk == self._month_key():
+                counter.spend_usd = (counter.spend_usd or 0.0) + cost_usd
         sub = self.get_subscription(tenant_id)
         if sub:
-            sub.actions_used_period = counter.action_count
+            month_c = self._counter(tenant_id, self._month_key())
+            sub.actions_used_period = month_c.action_count
         self.db.commit()
 
     def agent_allowed(self, tenant_id: str, agent_key: str) -> bool:
@@ -272,3 +421,11 @@ class SubscriptionService:
         if "*" in allowed:
             return True
         return agent_key.lower() in [a.lower() for a in allowed]
+
+    def video_features_enabled(self, tenant_id: str) -> bool:
+        """In-app video creation is off for explorer plan (and config)."""
+        from app.core.config import settings
+        if not getattr(settings, "ENABLE_IN_APP_VIDEO", False):
+            return False
+        ent = self.entitlements(tenant_id)
+        return bool((ent.get("feature_flags") or {}).get("video_studio"))

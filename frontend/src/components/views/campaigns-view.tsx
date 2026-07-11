@@ -38,7 +38,9 @@ export default function CampaignsView({
   const [imageProvider, setImageProvider] = useState('openai');
   const [videoProvider, setVideoProvider] = useState('pika');
   const [generateImages, setGenerateImages] = useState(true);
-  const [generateVideos, setGenerateVideos] = useState(true);
+  // In-app video generation not ready — keep state but force off / hide UI
+  const ENABLE_IN_APP_VIDEO = false;
+  const [generateVideos, setGenerateVideos] = useState(false);
   const [generateRemotion, setGenerateRemotion] = useState(false);
   const [campaignPosts, setCampaignPosts] = useState<any[]>([]);
   const [campaignFilterPlatform, setCampaignFilterPlatform] = useState<string>('all');
@@ -186,8 +188,8 @@ export default function CampaignsView({
           image_provider: imageProvider,
           video_provider: videoProvider,
           generate_images: generateImages,
-          generate_videos: generateVideos,
-          generate_remotion: generateRemotion
+          generate_videos: ENABLE_IN_APP_VIDEO && generateVideos,
+          generate_remotion: ENABLE_IN_APP_VIDEO && generateRemotion
         })
       });
       const data = await res.json();
@@ -759,8 +761,8 @@ export default function CampaignsView({
                       <SelectContent className="bg-gray-900 border-gray-850 text-white">
                         <SelectItem value="none">None (No prompt attachment)</SelectItem>
                         <SelectItem value="image">Image Prompt (For AI Graphics)</SelectItem>
-                        <SelectItem value="video">Video Prompt (For AI Video loops)</SelectItem>
-                        <SelectItem value="remotion">Remotion Video Prompt (For Code-based Video)</SelectItem>
+                        {ENABLE_IN_APP_VIDEO && <SelectItem value="video">Video Prompt (For AI Video loops)</SelectItem>}
+                        {ENABLE_IN_APP_VIDEO && <SelectItem value="remotion">Remotion Video Prompt (For Code-based Video)</SelectItem>}
                       </SelectContent>
                     </Select>
                   </div>
@@ -800,7 +802,7 @@ export default function CampaignsView({
                   )}
 
                   {/* Video Prompt Section */}
-                  {editingVideoPromptEnabled && (
+                  {ENABLE_IN_APP_VIDEO && editingVideoPromptEnabled && (
                     <div className="space-y-2 pt-2 border-t border-gray-900 animate-in fade-in duration-200">
                       <label className="text-[10px] font-bold text-indigo-405 uppercase tracking-wider block">Video Generation Prompt</label>
                       <Textarea
@@ -834,7 +836,7 @@ export default function CampaignsView({
                   )}
 
                   {/* Remotion Prompt Section */}
-                  {editingRemotionPromptEnabled && (
+                  {ENABLE_IN_APP_VIDEO && editingRemotionPromptEnabled && (
                     <div className="space-y-2 pt-2 border-t border-gray-900 animate-in fade-in duration-200">
                       <label className="text-[10px] font-bold text-blue-405 uppercase tracking-wider block">Remotion Generation Prompt</label>
                       <Textarea
@@ -1392,6 +1394,8 @@ export default function CampaignsView({
                             )}
                           </div>
 
+{ENABLE_IN_APP_VIDEO && (
+<>
                           {/* Video Settings */}
                           <div className="space-y-2 border-t border-gray-850 pt-2">
                             <div className="flex items-center justify-between">
@@ -1438,6 +1442,8 @@ export default function CampaignsView({
                               />
                             </div>
                           </div>
+</>
+)}
                         </div>
                       </div>
 
@@ -2059,7 +2065,7 @@ export default function CampaignsView({
                           <SelectContent className="bg-gray-900 border-gray-800 text-white">
                             <SelectItem value="none">None (No prompt attachment)</SelectItem>
                             <SelectItem value="image">Image Prompt (For AI Graphics)</SelectItem>
-                            <SelectItem value="video">Video Prompt (For AI Video loops)</SelectItem>
+                            {ENABLE_IN_APP_VIDEO && <SelectItem value="video">Video Prompt (For AI Video loops)</SelectItem>}
                           </SelectContent>
                         </Select>
                       </div>
@@ -2088,7 +2094,7 @@ export default function CampaignsView({
                       )}
 
                       {/* Video Prompt */}
-                      {createPostVideoPromptEnabled && (
+                      {ENABLE_IN_APP_VIDEO && createPostVideoPromptEnabled && (
                         <div className="space-y-2 pt-2 border-t border-gray-900 animate-in fade-in duration-200">
                           <label className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider block">Video Generation Prompt</label>
                           <Textarea

@@ -324,7 +324,20 @@ export default function EnterpriseView({ token }: { token: string }) {
                 Seats {entitlements.seats_used}/{entitlements.seat_limit ?? '∞'} · Actions{' '}
                 {entitlements.actions_used_period}/{entitlements.action_quota_monthly}
               </div>
-              <div className="text-xs">USD ${entitlements.plan?.price_usd_monthly}/mo · INR ₹{entitlements.plan?.price_inr_monthly}/mo</div>
+              <div className="text-xs">
+                USD ${entitlements.plan?.price_usd_monthly}/mo · INR ₹{entitlements.plan?.price_inr_monthly}/mo
+              </div>
+              <div className="text-[11px] text-zinc-400 pt-1 space-y-0.5">
+                <div>
+                  Monthly actions: {entitlements.actions_used_period ?? 0}/{entitlements.action_quota_monthly ?? '—'}
+                </div>
+                <div>
+                  Weekly actions: {entitlements.actions_used_weekly ?? 0}/{entitlements.weekly_action_quota ?? '—'}
+                </div>
+                <div>
+                  Lifetime: {entitlements.actions_used_lifetime ?? 0}/{entitlements.lifetime_action_quota ?? '∞'}
+                </div>
+              </div>
             </Card>
           )}
           <div className="grid md:grid-cols-2 gap-3">
@@ -332,25 +345,29 @@ export default function EnterpriseView({ token }: { token: string }) {
               <Card key={p.code} className="p-4 bg-black/40 border-white/10 space-y-2">
                 <div className="font-medium text-white">{p.name}</div>
                 <div className="text-xs text-muted-foreground">
-                  ${p.price_usd_monthly}/mo · ₹{p.price_inr_monthly}/mo
+                  Full product access · high exploratory rate limits
                 </div>
-                <div className="text-[11px] text-zinc-400">Agents: {(p.allowed_agents || []).join(', ')}</div>
+                <div className="text-[11px] text-zinc-400">
+                  Agents: {(p.allowed_agents || []).join(', ') || 'all'}
+                </div>
                 <div className="flex flex-wrap gap-2">
-                  {p.code !== 'enterprise' && (
+                  {Number(p.price_inr_monthly) > 0 && (
                     <Button size="sm" onClick={() => payWithRazorpay(p.code)}>
                       Pay with Razorpay (₹)
                     </Button>
                   )}
                   <Button size="sm" variant="outline" onClick={() => changePlan(p.code)}>
-                    Select free (admin)
+                    Activate plan
                   </Button>
                 </div>
               </Card>
             ))}
           </div>
+          {plans.length === 0 && (
+            <p className="text-xs text-muted-foreground">No active plans configured.</p>
+          )}
           <p className="text-[11px] text-muted-foreground">
-            Payments use Razorpay (INR). Set RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET in server .env.
-            Enterprise plan is custom invoicing.
+            Only the Full Access plan is active. Other tiers remain in code but are deactivated.
           </p>
         </div>
       )}

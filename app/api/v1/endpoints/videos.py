@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Any, List, Optional
 from app.api import deps
+from app.core.config import settings
 from app.core.rbac import Action, Resource, require_permission
 from app.models.base import User
 from pydantic import BaseModel
@@ -9,7 +10,16 @@ from app.models.video import VideoProject, VideoAsset, VideoRender
 from app.models.agents import ActivityLog
 from datetime import datetime
 
-router = APIRouter()
+def require_video_enabled() -> None:
+    if not getattr(settings, "ENABLE_IN_APP_VIDEO", False):
+        raise HTTPException(
+            status_code=503,
+            detail="In-app video creation is temporarily unavailable.",
+        )
+
+
+router = APIRouter(dependencies=[Depends(require_video_enabled)])
+
 
 class VideoCreateRequest(BaseModel):
     prompt: str

@@ -182,8 +182,14 @@ def generate_campaign_task(tenant_id: str, params: dict):
         image_provider = params.get("image_provider", "openai")
         video_provider = params.get("video_provider", "pika")
         generate_images = params.get("generate_images", True)
-        generate_videos = params.get("generate_videos", True)
-        generate_remotion = params.get("generate_remotion", False)
+        from app.core.config import settings as app_settings
+        # Force-off in-app video until product-ready
+        generate_videos = bool(params.get("generate_videos", False)) and bool(
+            getattr(app_settings, "ENABLE_IN_APP_VIDEO", False)
+        )
+        generate_remotion = bool(params.get("generate_remotion", False)) and bool(
+            getattr(app_settings, "ENABLE_IN_APP_VIDEO", False)
+        )
         
         # Log start activity
         log = ActivityLog(

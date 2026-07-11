@@ -37,6 +37,9 @@ import { clearSession, fetchWithSession, getAccessToken, saveSession } from '@/l
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api/v1';
 
+// In-app video creation is not ready — hide from users (code kept for later)
+const ENABLE_IN_APP_VIDEO = false;
+
 // ─── Nav Groups ──────────────────────────────────────────────────────────────
 const NAV_GROUPS = [
   {
@@ -50,7 +53,9 @@ const NAV_GROUPS = [
     label: 'Growth',
     items: [
       { id: 'campaigns', name: 'Campaign Planner', icon: Calendar, color: '#6366f1', section: 'marketing' },
-      { id: 'video_studio', name: 'Video Studio AI', icon: Video, color: '#f43f5e', section: 'marketing' },
+      ...(ENABLE_IN_APP_VIDEO
+        ? [{ id: 'video_studio', name: 'Video Studio AI', icon: Video, color: '#f43f5e', section: 'marketing' }]
+        : []),
       { id: 'sales', name: 'Sales CRM', icon: TrendingUp, color: '#10b981', section: 'sales' },
       { id: 'support', name: 'Customer Support', icon: MessageSquare, color: '#3b82f6', section: 'support' },
     ],
@@ -801,6 +806,7 @@ export default function Home() {
             />
           </div>
 
+          {ENABLE_IN_APP_VIDEO && (
           <div className={activeView === 'video_studio' ? 'block animate-fade-in-up' : 'hidden'}>
             <VideoStudioView
               token={token}
@@ -808,6 +814,7 @@ export default function Home() {
               fetchWithAuth={fetchWithAuth}
             />
           </div>
+          )}
 
           <div className={activeView === 'ai_optimization' ? 'block animate-fade-in-up' : 'hidden'}>
             <AIOptimizationView

@@ -32,8 +32,9 @@ class MarketingAgent(BaseAgent):
             "image_provider": params.get("image_provider", "openai"),
             "video_provider": params.get("video_provider", "pika"),
             "generate_images": params.get("generate_images", True),
-            "generate_videos": params.get("generate_videos", False),
-            "generate_remotion": params.get("generate_remotion", False),
+            # In-app video creation disabled until ready (settings.ENABLE_IN_APP_VIDEO)
+            "generate_videos": False,
+            "generate_remotion": False,
         }
         generate_campaign_task.delay(self.tenant_id, payload)
         days = payload["days"]

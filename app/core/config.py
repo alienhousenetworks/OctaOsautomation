@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     SHARED_CLAUDE_KEY: Optional[str] = None
     PILOT_BUDGET_LIMIT: float = 7000.0  # in INR
 
+    # Product feature flags (user-facing)
+    ENABLE_IN_APP_VIDEO: bool = False  # hide Video Studio + campaign video gen until ready
+    # High global API rate limits (per tenant+IP+path / minute) for exploration
+    TENANT_API_RATE_LIMIT_PER_MINUTE: int = 300
+
     # PUBLIC MEDIA
     PUBLIC_BASE_URL: str = "http://localhost:8000"
     MEDIA_UPLOAD_DIR: str = "uploads"

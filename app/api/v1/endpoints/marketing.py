@@ -197,6 +197,14 @@ async def generate_media_for_post(
     from app.services.llm_gateway import LLMGateway
     gateway = LLMGateway(db, tenant_id)
 
+    if req.media_type in ("video", "remotion"):
+        from app.core.config import settings as app_settings
+        if not getattr(app_settings, "ENABLE_IN_APP_VIDEO", False):
+            raise HTTPException(
+                status_code=503,
+                detail="In-app video creation is temporarily unavailable.",
+            )
+
     if req.media_type == "video":
         provider = req.provider or "pika"
         video_url = await gateway.generate_video(req.prompt, provider=provider)
