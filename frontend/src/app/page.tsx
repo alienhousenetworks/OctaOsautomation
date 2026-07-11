@@ -33,6 +33,7 @@ import EnterpriseView from '@/components/views/enterprise-view';
 
 import LandingPage from '@/components/landing-page';
 import AuthForms from '@/components/auth-forms';
+import { clearSession, fetchWithSession, getAccessToken, saveSession } from '@/lib/auth-session';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api/v1';
 
@@ -202,17 +203,32 @@ export default function Home() {
   }, []);
 
   const fetchWithAuth = async (url: string, options: any = {}) => {
-    const headers = {
-      ...options.headers,
-      'Authorization': `Bearer ${token}`
-    };
-    const res = await fetch(url, { ...options, headers });
-    if (res.status === 401) handleLogout();
+    // Prefer live token from storage (after refresh) over React state
+    const active = getAccessToken() || token;
+    const res = await fetchWithSession(url, options, API_URL);
+    // Sync React state if refresh rotated the access token
+    const newest = getAccessToken();
+    if (newest && newest !== active && newest !== token) {
+      setToken(newest);
+    }
+    if (res.status === 401) {
+      // Refresh failed or no refresh token — force re-login
+      handleLogout();
+    }
     return res;
   };
 
+  const safeJson = async (res: Response, fallback: any = null) => {
+    if (!res.ok) return fallback;
+    try {
+      return await res.json();
+    } catch {
+      return fallback;
+    }
+  };
+
   const fetchData = async () => {
-    if (!token) return;
+    if (!token && !getAccessToken()) return;
     try {
       if (!userProfile) {
         const meRes = await fetchWithAuth(`${API_URL}/auth/me`);
@@ -223,6 +239,9 @@ export default function Home() {
             localStorage.setItem('tenant_id', meData.tenant_id);
             setTenantId(meData.tenant_id);
           }
+        } else if (meRes.status === 401 || meRes.status === 403) {
+          // Session dead — don't keep polling and crashing UI
+          return;
         }
       } else if (!tenantId) {
         const meRes = await fetchWithAuth(`${API_URL}/auth/me`);
@@ -244,14 +263,15 @@ export default function Home() {
         fetchWithAuth(`${API_URL}/dashboard/marketplace/installed`),
         fetchWithAuth(`${API_URL}/commands/keys`)
       ]);
-      setQueue(await qRes.json());
-      setTimeline(await tRes.json());
-      setKnowledge(await kRes.json());
-      setMetrics(await mRes.json());
-      setTeams(await tmRes.json());
-      setApps(await aRes.json());
+      // Guard against error JSON objects (fixes t.slice is not a function crashes)
+      setQueue(await safeJson(qRes, []));
+      setTimeline(await safeJson(tRes, []));
+      setKnowledge(await safeJson(kRes, []));
+      setMetrics(await safeJson(mRes, {}));
+      setTeams(await safeJson(tmRes, []));
+      setApps(await safeJson(aRes, []));
 
-      const keyStatusData = await keyStatusRes.json();
+      const keyStatusData = await safeJson(keyStatusRes, {});
       setConfiguredProviders(keyStatusData.configured_providers || []);
     } catch (e) {
       console.error(e);
@@ -274,8 +294,7 @@ export default function Home() {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('tenant_id');
+    clearSession();
     setToken(null);
     setTenantId(null);
     setUserProfile(null);
@@ -776,8 +795,8 @@ export default function Home() {
               fetchWithAuth={fetchWithAuth}
               userProfile={userProfile}
               setUserProfile={setUserProfile}
-              setToken={(t) => { setToken(t); localStorage.setItem('token', t); }}
-              setTenantId={(id) => { setTenantId(id); localStorage.setItem('tenant_id', id); }}
+              setToken={(t) => { setToken(t); if (t) saveSession({ access_token: t }); }}
+              setTenantId={(id) => { setTenantId(id); if (id) localStorage.setItem('tenant_id', id); }}
               fetchData={fetchData}
             />
           </div>

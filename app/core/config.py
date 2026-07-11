@@ -12,8 +12,10 @@ class Settings(BaseSettings):
     # SECURITY — never ship production with default SECRET_KEY
     SECRET_KEY: str = "dev-only-insecure-secret-key-change-me"
     ENCRYPTION_KEY: Optional[str] = None  # optional dedicated Fernet key
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # short-lived access tokens
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 14
+    # Access JWT lifetime. Frontend also supports refresh tokens for longer sessions.
+    # 7 days avoids mass 403s when users reopen the app after a few days without refresh handling.
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     MFA_REQUIRED: bool = False
 
     # CORS — comma-separated origins; empty/"*" only allowed in DEV

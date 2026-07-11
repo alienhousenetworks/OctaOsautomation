@@ -85,9 +85,18 @@ export default function ProfileView({
       });
       if (res.ok) {
         const data = await res.json();
-        // Update token + tenant in localStorage
-        localStorage.setItem('token', data.access_token);
-        localStorage.setItem('tenant_id', data.tenant_id);
+        // Update token + tenant in localStorage (include refresh if rotated)
+        try {
+          const { saveSession } = await import('@/lib/auth-session');
+          saveSession({
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+            tenant_id: data.tenant_id,
+          });
+        } catch {
+          localStorage.setItem('token', data.access_token);
+          localStorage.setItem('tenant_id', data.tenant_id);
+        }
         setToken(data.access_token);
         setTenantId(data.tenant_id);
         setSwitchSuccess(tenantId);

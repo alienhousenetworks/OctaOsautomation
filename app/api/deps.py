@@ -30,16 +30,19 @@ def get_current_user(
             # Reject refresh tokens used as access tokens
             if token_type == "refresh":
                 raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
+                    status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid token type",
+                    headers={"WWW-Authenticate": "Bearer"},
                 )
         token_data = payload.get("sub")
         tenant_id = payload.get("tenant_id")
         org_id = payload.get("organization_id")
     except JWTError:
+        # 401 so clients can attempt refresh / re-login (was 403 which looked like RBAC)
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Could not validate credentials",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials — session expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     user = db.query(User).filter(User.id == token_data).first()
     if not user:

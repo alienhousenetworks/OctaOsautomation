@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Zap, Loader2 } from 'lucide-react';
+import { saveSession } from '@/lib/auth-session';
 
 interface AuthFormsProps {
   appState: 'login' | 'signup';
@@ -93,12 +94,13 @@ export default function AuthForms({
       });
       const data = await res.json();
       if (res.ok) {
-        localStorage.setItem('token', data.access_token);
+        saveSession({
+          access_token: data.access_token,
+          refresh_token: data.refresh_token,
+          tenant_id: data.tenant_id,
+        });
         setToken(data.access_token);
-        if (data.tenant_id) {
-          localStorage.setItem('tenant_id', data.tenant_id);
-          setTenantId(data.tenant_id);
-        }
+        if (data.tenant_id) setTenantId(data.tenant_id);
         setInviteToken?.(null);
         setAppState('app');
       } else {
@@ -174,12 +176,13 @@ export default function AuthForms({
           setTenantSelection(data.tenants);
           setTempEmail(email);
         } else if (data.otp_required === false) {
-          localStorage.setItem('token', data.access_token);
+          saveSession({
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+            tenant_id: data.tenant_id,
+          });
           setToken(data.access_token);
-          if (data.tenant_id) {
-            localStorage.setItem('tenant_id', data.tenant_id);
-            setTenantId(data.tenant_id);
-          }
+          if (data.tenant_id) setTenantId(data.tenant_id);
           // Reset states
           setOtpSent(false);
           setOtp('');
@@ -219,12 +222,13 @@ export default function AuthForms({
            setTenantSelection(data.tenants);
            setOtpSent(false);
         } else {
-          localStorage.setItem('token', data.access_token);
+          saveSession({
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+            tenant_id: data.tenant_id,
+          });
           setToken(data.access_token);
-          if (data.tenant_id) {
-            localStorage.setItem('tenant_id', data.tenant_id);
-            setTenantId(data.tenant_id);
-          }
+          if (data.tenant_id) setTenantId(data.tenant_id);
           // Reset states
           setOtpSent(false);
           setOtp('');
@@ -267,12 +271,13 @@ export default function AuthForms({
       });
       const data = await res.json();
       if (res.ok) {
-        localStorage.setItem('token', data.access_token);
+        saveSession({
+          access_token: data.access_token,
+          refresh_token: data.refresh_token,
+          tenant_id: data.tenant_id,
+        });
         setToken(data.access_token);
-        if (data.tenant_id) {
-          localStorage.setItem('tenant_id', data.tenant_id);
-          setTenantId(data.tenant_id);
-        }
+        if (data.tenant_id) setTenantId(data.tenant_id);
         // Reset states
         setOtpSent(false);
         setOtp('');

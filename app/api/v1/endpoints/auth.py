@@ -449,8 +449,7 @@ def signup_verify(
     db.commit()
     db.refresh(user)
 
-    access_token = create_access_token(subject=user.id, tenant_id=user.tenant_id, organization_id=user.organization_id)
-    return {"access_token": access_token, "token_type": "bearer", "tenant_id": user.tenant_id}
+    return _issue_tokens(db, user)
 
 
 @router.post("/signup/resend-otp")
@@ -531,13 +530,9 @@ def login_initiate(
                 headers={"X-Verification-Required": "true"}
             )
             
-        access_token = create_access_token(subject=user.id, tenant_id=user.tenant_id, organization_id=user.organization_id)
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "tenant_id": user.tenant_id,
-            "otp_required": False
-        }
+        tokens = _issue_tokens(db, user)
+        tokens["otp_required"] = False
+        return tokens
     else:
         # OTP LOGIN FLOW
         otp = generate_otp()
@@ -613,8 +608,7 @@ def login_verify(
         db.add(u)
     db.commit()
 
-    access_token = create_access_token(subject=user.id, tenant_id=user.tenant_id, organization_id=user.organization_id)
-    return {"access_token": access_token, "token_type": "bearer", "tenant_id": user.tenant_id}
+    return _issue_tokens(db, user)
 
 
 @router.post("/login/resend-otp")
@@ -707,8 +701,7 @@ def switch_tenant(
         raise HTTPException(status_code=404, detail="Organization not found for this account")
     if not user.is_active:
         raise HTTPException(status_code=400, detail="This organization account is inactive")
-    access_token = create_access_token(subject=user.id, tenant_id=user.tenant_id, organization_id=user.organization_id)
-    return {"access_token": access_token, "token_type": "bearer", "tenant_id": user.tenant_id}
+    return _issue_tokens(db, user)
 
 class InviteCreate(BaseModel):
     email: Optional[EmailStr] = None
@@ -819,9 +812,8 @@ def accept_invite(
     db.add(invitation)
     db.commit()
     db.refresh(new_user)
-    
-    access_token = create_access_token(subject=new_user.id, tenant_id=new_user.tenant_id, organization_id=new_user.organization_id)
-    return {"access_token": access_token, "token_type": "bearer", "tenant_id": new_user.tenant_id}
+
+    return _issue_tokens(db, new_user)
 
 @router.get("/members")
 def list_members(
