@@ -329,13 +329,10 @@ export default function EnterpriseView({ token }: { token: string }) {
               </div>
               <div className="text-[11px] text-zinc-400 pt-1 space-y-0.5">
                 <div>
-                  Monthly actions: {entitlements.actions_used_period ?? 0}/{entitlements.action_quota_monthly ?? '—'}
+                  Monthly actions: {entitlements.actions_used_period ?? 0}/{entitlements.action_quota_monthly ?? '—'} (resets each month)
                 </div>
                 <div>
-                  Weekly actions: {entitlements.actions_used_weekly ?? 0}/{entitlements.weekly_action_quota ?? '—'}
-                </div>
-                <div>
-                  Lifetime: {entitlements.actions_used_lifetime ?? 0}/{entitlements.lifetime_action_quota ?? '∞'}
+                  Weekly actions: {entitlements.actions_used_weekly ?? 0}/{entitlements.weekly_action_quota ?? '—'} (resets each week)
                 </div>
               </div>
             </Card>

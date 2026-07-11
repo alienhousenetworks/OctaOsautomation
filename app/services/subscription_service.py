@@ -1,4 +1,4 @@
-"""Subscription plans, entitlements, seats, action quotas (monthly + weekly + lifetime)."""
+"""Subscription plans, entitlements, seats, action quotas (monthly + weekly; refresh each period)."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -34,7 +34,6 @@ DEFAULT_PLANS = [
             "mfa": True,
             "approvals": True,
             "weekly_action_quota": 1500,
-            "lifetime_action_quota": 50000,
         },
     },
     {
@@ -53,7 +52,6 @@ DEFAULT_PLANS = [
             "mfa": True,
             "approvals": True,
             "weekly_action_quota": 8000,
-            "lifetime_action_quota": 200000,
         },
     },
     {
@@ -73,7 +71,6 @@ DEFAULT_PLANS = [
             "approvals": True,
             "audit_export": True,
             "weekly_action_quota": 30000,
-            "lifetime_action_quota": 1000000,
         },
     },
     {
@@ -95,17 +92,17 @@ DEFAULT_PLANS = [
             "dedicated_env": True,
             "sla": True,
             "weekly_action_quota": 100000,
-            "lifetime_action_quota": None,
         },
     },
     # Single active plan — full product access, high exploratory limits
+    # Quotas refresh monthly / weekly (no lifetime total — users renew each month)
     {
         "code": "explorer",
         "name": "OctaOS Full Access",
         "price_usd_monthly": 0.0,
         "price_inr_monthly": 0.0,
         "seat_limit": None,
-        "action_quota_monthly": 100000,  # monthly AI/actions ceiling (high)
+        "action_quota_monthly": 100000,  # refreshes each calendar month
         "allowed_agents": ["*"],
         "is_active": True,
         "feature_flags": {
@@ -117,8 +114,7 @@ DEFAULT_PLANS = [
             "audit_export": True,
             "all_access": True,
             "video_studio": False,  # in-app video creation hidden
-            "weekly_action_quota": 25000,  # high weekly room to explore
-            "lifetime_action_quota": 500000,  # total soft ceiling
+            "weekly_action_quota": 25000,  # refreshes each ISO week
             "api_rate_limit_per_minute": 300,  # high request rate
         },
     },
@@ -277,9 +273,6 @@ class SubscriptionService:
         # ISO week: 2026-W28
         return datetime.now(timezone.utc).strftime("%Y-W%W")
 
-    def _lifetime_key(self) -> str:
-        return "lifetime"
-
     def entitlements(self, tenant_id: str) -> Dict[str, Any]:
         sub = self.ensure_trial(tenant_id)
         plan = self.db.query(SubscriptionPlan).filter(SubscriptionPlan.id == sub.plan_id).first()
@@ -288,16 +281,14 @@ class SubscriptionService:
 
         month_c = self._counter(tenant_id, self._month_key())
         week_c = self._counter(tenant_id, self._week_key())
-        life_c = self._counter(tenant_id, self._lifetime_key())
         sub.actions_used_period = month_c.action_count or 0
         self.db.commit()
 
         flags = dict(plan.feature_flags or {})
         flags.update(sub.feature_overrides or {})
+        # Drop legacy lifetime flag if still present in DB feature_flags
+        flags.pop("lifetime_action_quota", None)
         weekly_quota = int(flags.get("weekly_action_quota") or 25000)
-        lifetime_quota = flags.get("lifetime_action_quota")
-        if lifetime_quota is not None:
-            lifetime_quota = int(lifetime_quota)
 
         return {
             "tenant_id": tenant_id,
@@ -314,8 +305,6 @@ class SubscriptionService:
             "actions_used_period": month_c.action_count or 0,
             "actions_used_weekly": week_c.action_count or 0,
             "weekly_action_quota": weekly_quota,
-            "actions_used_lifetime": life_c.action_count or 0,
-            "lifetime_action_quota": lifetime_quota,
             "allowed_agents": plan.allowed_agents,
             "feature_flags": flags,
             "trial_ends_at": sub.trial_ends_at.isoformat() if sub.trial_ends_at else None,
@@ -339,18 +328,13 @@ class SubscriptionService:
 
         month_c = self._counter(tenant_id, self._month_key())
         week_c = self._counter(tenant_id, self._week_key())
-        life_c = self._counter(tenant_id, self._lifetime_key())
 
         used_m = month_c.action_count or 0
         used_w = week_c.action_count or 0
-        used_l = life_c.action_count or 0
         spend = month_c.spend_usd or 0.0
 
         quota_m = plan.action_quota_monthly or 100000
         quota_w = int(flags.get("weekly_action_quota") or 25000)
-        quota_l = flags.get("lifetime_action_quota")
-        if quota_l is not None:
-            quota_l = int(quota_l)
 
         hard = True
         spend_cap = 999999.0
@@ -359,10 +343,11 @@ class SubscriptionService:
             spend_cap = float(cap.monthly_spend_usd or spend_cap)
             hard = bool(cap.hard_stop)
 
+        # Weekly and monthly counters reset automatically (new period_key each week/month)
         if hard and used_w >= quota_w:
             return {
                 "allowed": False,
-                "reason": f"Weekly action limit reached ({used_w}/{quota_w})",
+                "reason": f"Weekly action limit reached ({used_w}/{quota_w}). Resets next week.",
                 "used_weekly": used_w,
                 "quota_weekly": quota_w,
                 "used": used_m,
@@ -371,18 +356,11 @@ class SubscriptionService:
         if hard and used_m >= quota_m:
             return {
                 "allowed": False,
-                "reason": f"Monthly action limit reached ({used_m}/{quota_m})",
+                "reason": f"Monthly action limit reached ({used_m}/{quota_m}). Resets next billing month.",
                 "used": used_m,
                 "quota": quota_m,
                 "used_weekly": used_w,
                 "quota_weekly": quota_w,
-            }
-        if hard and quota_l is not None and used_l >= quota_l:
-            return {
-                "allowed": False,
-                "reason": f"Total action limit reached ({used_l}/{quota_l})",
-                "used_lifetime": used_l,
-                "quota_lifetime": quota_l,
             }
         if hard and spend + cost_usd > spend_cap:
             return {
@@ -397,14 +375,13 @@ class SubscriptionService:
             "quota": quota_m,
             "used_weekly": used_w,
             "quota_weekly": quota_w,
-            "used_lifetime": used_l,
-            "quota_lifetime": quota_l,
             "spend": spend,
             "spend_cap": spend_cap,
         }
 
     def record_action(self, tenant_id: str, cost_usd: float = 0.0, count: int = 1) -> None:
-        for pk in (self._month_key(), self._week_key(), self._lifetime_key()):
+        # Only monthly + weekly (refreshing) counters — no lifetime total
+        for pk in (self._month_key(), self._week_key()):
             counter = self._counter(tenant_id, pk)
             counter.action_count = (counter.action_count or 0) + count
             if pk == self._month_key():
