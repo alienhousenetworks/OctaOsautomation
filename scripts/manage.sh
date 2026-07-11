@@ -16,30 +16,27 @@ fi
 # Alembic must be run from the repo root so it finds alembic.ini
 cd "$APP_DIR"
 
+# Load .env so POSTGRES_* / SQLALCHEMY_DATABASE_URI are available
+if [[ -f "$APP_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$APP_DIR/.env"
+  set +a
+fi
+
 case "$1" in
   makemigrations)
-    # Equivalent to Django's `python manage.py makemigrations`
-    # It reads your SQLAlchemy models and automatically generates the alter/create/drop SQL
+    # Dev only — do NOT run on production deploy
     MSG="${2:-auto_migration}"
     echo "Generating new database migrations for: $MSG"
+    echo "WARNING: Do not run this on the VPS. Migrations should be committed in git."
     "$VENV_DIR/bin/alembic" revision --autogenerate -m "$MSG"
     ;;
-    
+
   migrate)
-    # Equivalent to Django's `python manage.py migrate`
-    # It applies all pending migrations to the database
-    echo "Applying pending migrations to the database..."
-    # Use `heads` so a temporary multi-head graph still applies (merge if needed).
-    # Prefer single `head` when graph is linear.
-    HEADS_COUNT=$("$VENV_DIR/bin/alembic" heads 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "${HEADS_COUNT:-0}" -gt 1 ]]; then
-      echo "WARNING: multiple Alembic heads detected ($HEADS_COUNT). Upgrading all heads."
-      echo "Heads:"
-      "$VENV_DIR/bin/alembic" heads || true
-      "$VENV_DIR/bin/alembic" upgrade heads
-    else
-      "$VENV_DIR/bin/alembic" upgrade head
-    fi
+    # Production-safe migrate: uses .env password automatically, fixes orphan stamps
+    echo "Applying database migrations (safe mode)..."
+    "$VENV_DIR/bin/python3" "$SCRIPT_DIR/fix_alembic_and_migrate.py"
     ;;
 
   heads)
@@ -54,61 +51,52 @@ case "$1" in
     "$VENV_DIR/bin/alembic" history
     ;;
 
+  show-db-password)
+    # Print DB connection info from .env (password masked unless --show)
+    if [[ "${2:-}" == "--show" ]]; then
+      echo "POSTGRES_USER=${POSTGRES_USER:-}"
+      echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}"
+      echo "POSTGRES_DB=${POSTGRES_DB:-}"
+      echo "POSTGRES_SERVER=${POSTGRES_SERVER:-}"
+    else
+      echo "POSTGRES_USER=${POSTGRES_USER:-}"
+      echo "POSTGRES_PASSWORD=******** (run: bash scripts/manage.sh show-db-password --show)"
+      echo "POSTGRES_DB=${POSTGRES_DB:-}"
+      echo "POSTGRES_SERVER=${POSTGRES_SERVER:-}"
+    fi
+    ;;
+
   stamp)
-    # Force-set alembic_version without running SQL.
-    # Use when DB points at a deleted local revision (e.g. old auto_deploy_update).
-    # Example: bash scripts/manage.sh stamp 9a1b2c3d4e5f
     TARGET="${2:-}"
     if [[ -z "$TARGET" ]]; then
       echo "Usage: bash scripts/manage.sh stamp <revision_id>"
-      echo "  Common: stamp 9a1b2c3d4e5f   then: migrate"
       exit 1
     fi
     echo "Stamping database to revision: $TARGET"
-    "$VENV_DIR/bin/alembic" stamp "$TARGET"
+    "$VENV_DIR/bin/alembic" stamp "$TARGET" || \
+      "$VENV_DIR/bin/python3" -c "
+from sqlalchemy import create_engine, text
+from app.core.config import settings
+e=create_engine(settings.SQLALCHEMY_DATABASE_URI)
+with e.begin() as c:
+    c.execute(text('DELETE FROM alembic_version'))
+    c.execute(text('INSERT INTO alembic_version (version_num) VALUES (:v)'), {'v': '$TARGET'})
+print('stamped $TARGET via SQL')
+"
     ;;
 
   fix-orphan-revision)
-    # Recover when alembic_version points at a missing file (deleted auto_deploy junk).
-    # Resets stamp to last known git revision before enterprise, then upgrades.
-    # SAFE: does not drop data; only rewrites alembic_version row + applies pending SQL.
-    FALLBACK="${2:-9a1b2c3d4e5f}"
-    echo "Attempting orphan revision recovery..."
-    echo "  1) Stamp to fallback git revision: $FALLBACK"
-    if ! "$VENV_DIR/bin/alembic" stamp "$FALLBACK"; then
-      echo "alembic stamp failed (common when current rev file is missing)."
-      echo "Falling back to direct SQL update of alembic_version..."
-      # shellcheck disable=SC1091
-      if [[ -f "$APP_DIR/.env" ]]; then set -a; source "$APP_DIR/.env"; set +a; fi
-      DB_URL="${SQLALCHEMY_DATABASE_URI:-}"
-      if [[ -z "$DB_URL" ]]; then
-        DB_URL="postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@${POSTGRES_SERVER:-localhost}/${POSTGRES_DB:-octaos}"
-      fi
-      "$VENV_DIR/bin/python3" - <<PY
-import sys
-from sqlalchemy import create_engine, text
-url = """${DB_URL}"""
-engine = create_engine(url)
-with engine.begin() as conn:
-    conn.execute(text("DELETE FROM alembic_version"))
-    conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": "${FALLBACK}"})
-    print("alembic_version set to ${FALLBACK}")
-PY
-    fi
-    echo "  2) Upgrade to head..."
-    "$VENV_DIR/bin/alembic" upgrade head
-    echo "Recovery complete. Current:"
-    "$VENV_DIR/bin/alembic" current || true
+    # Same as migrate safe path
+    "$VENV_DIR/bin/python3" "$SCRIPT_DIR/fix_alembic_and_migrate.py"
     ;;
-    
+
   *)
     echo "Usage:"
-    echo "  bash scripts/manage.sh makemigrations [optional_description_with_no_spaces]"
     echo "  bash scripts/manage.sh migrate"
-    echo "  bash scripts/manage.sh heads"
-    echo "  bash scripts/manage.sh current"
-    echo "  bash scripts/manage.sh history"
+    echo "  bash scripts/manage.sh heads | current | history"
+    echo "  bash scripts/manage.sh show-db-password [--show]"
     echo "  bash scripts/manage.sh stamp <revision>"
-    echo "  bash scripts/manage.sh fix-orphan-revision [fallback_rev]"
+    echo "  bash scripts/manage.sh fix-orphan-revision"
+    echo "  bash scripts/manage.sh makemigrations [msg]   # DEV ONLY"
     ;;
 esac

@@ -95,27 +95,15 @@ if [[ -d "$VENV_DIR" ]]; then
   fi
 
   # IMPORTANT: Do NOT autogenerate migrations on the VPS.
-  # `alembic revision --autogenerate` on production creates local-only revision
-  # files that fork the graph → "Multiple head revisions" on the next deploy.
-  # Migrations are authored in git and applied here only.
+  # Migrations come from git only. Safe migrate auto-cleans junk + fixes orphan stamps
+  # using POSTGRES_PASSWORD from .env (no manual password entry).
   chmod +x "$SCRIPT_DIR/manage.sh"
+  chmod +x "$SCRIPT_DIR/fix_alembic_and_migrate.py" 2>/dev/null || true
 
-  # Drop untracked auto-generated migration junk from older deploys (keep git-tracked only)
-  if [[ -d "$APP_DIR/alembic/versions" ]]; then
-    info "Checking for untracked local Alembic revisions..."
-    while IFS= read -r -d '' f; do
-      warn "Removing untracked local migration (not in git): $f"
-      rm -f "$f"
-    done < <(cd "$APP_DIR" && git ls-files --others --exclude-standard 'alembic/versions/*.py' -z 2>/dev/null || true)
+  info "Applying database migrations (auto-fix orphan stamps, uses .env DB password)..."
+  if ! "$SCRIPT_DIR/manage.sh" migrate; then
+    error "Migrations failed! Check logs above. DB password is in /opt/octaos/.env as POSTGRES_PASSWORD"
   fi
-
-  info "Alembic heads before migrate:"
-  "$SCRIPT_DIR/manage.sh" heads || true
-  info "Alembic current DB revision:"
-  "$SCRIPT_DIR/manage.sh" current || true
-
-  info "Applying database migrations from git..."
-  "$SCRIPT_DIR/manage.sh" migrate || error "Migrations failed!"
 
   if [[ -f "$APP_DIR/init_db.py" ]]; then
     "$VENV_DIR/bin/python3" "$APP_DIR/init_db.py" || warn "init_db.py had warnings (may be safe to ignore)"

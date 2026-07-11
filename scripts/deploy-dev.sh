@@ -308,8 +308,15 @@ info "Installing python dependencies …"
 "$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt" -q
 success "Python dependencies installed ✓"
 
-info "Running database init/migration …"
-"$VENV_DIR/bin/python3" "$APP_DIR/init_db.py" || warn "init_db.py had warnings (may be safe to ignore)"
+info "Running database migrations (safe mode, uses .env password) …"
+chmod +x "$APP_DIR/scripts/manage.sh" 2>/dev/null || true
+chmod +x "$APP_DIR/scripts/fix_alembic_and_migrate.py" 2>/dev/null || true
+if [[ -x "$APP_DIR/scripts/manage.sh" ]]; then
+  "$APP_DIR/scripts/manage.sh" migrate || warn "manage.sh migrate had issues — trying init_db.py"
+fi
+if [[ -f "$APP_DIR/init_db.py" ]]; then
+  "$VENV_DIR/bin/python3" "$APP_DIR/init_db.py" || warn "init_db.py had warnings (may be safe to ignore)"
+fi
 success "Database initialised ✓"
 
 # =============================================================================
