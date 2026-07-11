@@ -2,12 +2,23 @@ from typing import List, Optional, Union, Any
 from pydantic import validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     PROJECT_NAME: str = "OctaOS"
     API_V1_STR: str = "/api/v1"
-    SECRET_KEY: str = "secret" # In production, this should be a real secret
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7 # 7 days
-    
+    ENVIRONMENT: str = "development"  # development | staging | production
+    DEV: bool = True
+
+    # SECURITY — never ship production with default SECRET_KEY
+    SECRET_KEY: str = "dev-only-insecure-secret-key-change-me"
+    ENCRYPTION_KEY: Optional[str] = None  # optional dedicated Fernet key
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # short-lived access tokens
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 14
+    MFA_REQUIRED: bool = False
+
+    # CORS — comma-separated origins; empty/"*" only allowed in DEV
+    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+
     # POSTGRES
     POSTGRES_SERVER: str = "localhost"
     POSTGRES_USER: str = "postgres"
@@ -19,25 +30,28 @@ class Settings(BaseSettings):
     def assemble_db_connection(cls, v: Optional[str], values: dict) -> Any:
         if isinstance(v, str):
             return v
-        return f"postgresql://{values.get('POSTGRES_USER')}:{values.get('POSTGRES_PASSWORD')}@{values.get('POSTGRES_SERVER')}/{values.get('POSTGRES_DB')}"
+        return (
+            f"postgresql://{values.get('POSTGRES_USER')}:{values.get('POSTGRES_PASSWORD')}"
+            f"@{values.get('POSTGRES_SERVER')}/{values.get('POSTGRES_DB')}"
+        )
 
     # REDIS
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
-    
+
     # LLM KEYS
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
-    
+
     # PILOT CONFIG
     SHARED_CLAUDE_KEY: Optional[str] = None
     PILOT_BUDGET_LIMIT: float = 7000.0  # in INR
 
-    # PUBLIC MEDIA — optional fallback for URL-based publishing; Meta/IG/LinkedIn use direct binary upload
+    # PUBLIC MEDIA
     PUBLIC_BASE_URL: str = "http://localhost:8000"
     MEDIA_UPLOAD_DIR: str = "uploads"
 
-    # OAUTH — Meta (Facebook / Instagram)
+    # OAUTH — Meta
     META_APP_ID: Optional[str] = None
     META_APP_SECRET: Optional[str] = None
 
@@ -45,12 +59,29 @@ class Settings(BaseSettings):
     LINKEDIN_CLIENT_ID: Optional[str] = None
     LINKEDIN_CLIENT_SECRET: Optional[str] = None
 
-    # OPTIONAL INTEGRATIONS
-
+    # OPTIONAL
     PINTEREST_ACCESS_TOKEN: Optional[str] = None
 
+    # Stripe (subscription engine)
+    STRIPE_SECRET_KEY: Optional[str] = None
+    STRIPE_WEBHOOK_SECRET: Optional[str] = None
+    STRIPE_PRICE_STARTER: Optional[str] = None
+    STRIPE_PRICE_GROWTH: Optional[str] = None
+    STRIPE_PRICE_BUSINESS: Optional[str] = None
+
+    # SSO (OIDC) optional
+    OIDC_CLIENT_ID: Optional[str] = None
+    OIDC_CLIENT_SECRET: Optional[str] = None
+    OIDC_DISCOVERY_URL: Optional[str] = None
+    OIDC_REDIRECT_URI: Optional[str] = None
+
+    # Metrics auth
+    METRICS_TOKEN: Optional[str] = None
+
+    # Webhook email HMAC default (per-tenant preferred)
+    EMAIL_WEBHOOK_HMAC_SECRET: Optional[str] = None
+
     # SMTP & DEV SETTINGS
-    DEV: bool = True
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
     SMTP_USER: Optional[str] = None
@@ -63,6 +94,14 @@ class Settings(BaseSettings):
     EMAIL_HOST_USER: Optional[str] = None
     EMAIL_HOST_PASSWORD: Optional[str] = None
     DEFAULT_FROM_EMAIL: Optional[str] = None
+
+    def cors_origin_list(self) -> List[str]:
+        raw = (self.CORS_ORIGINS or "").strip()
+        if not raw or raw == "*":
+            if self.DEV or self.ENVIRONMENT in ("development", "dev", "local", "test"):
+                return ["*"]
+            return ["http://localhost:3000"]
+        return [o.strip() for o in raw.split(",") if o.strip()]
 
     def __init__(self, **values: Any):
         super().__init__(**values)
@@ -84,5 +123,6 @@ class Settings(BaseSettings):
         env_file=".env",
         extra="ignore",
     )
+
 
 settings = Settings()

@@ -4,6 +4,8 @@ from typing import List, Any, Optional
 from pydantic import BaseModel
 
 from app.api import deps
+from app.core.rbac import Action, Resource, require_permission
+from app.models.base import User
 from app.schemas import verticals as schemas
 from app.models import verticals as models
 from app.services.agents.hr import HRAgent
@@ -38,6 +40,7 @@ class StatusUpdateRequest(BaseModel):
 def read_candidates(
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.HR, Action.READ)),
     skip: int = 0,
     limit: int = 100
 ) -> Any:
@@ -51,6 +54,7 @@ def create_candidate(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.HR, Action.CREATE)),
     candidate_in: schemas.CandidateCreate
 ) -> Any:
     candidate = models.Candidate(**candidate_in.dict(), tenant_id=tenant_id)
@@ -79,6 +83,7 @@ async def source_candidates(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.HR, Action.CREATE)),
     request: SourceRequest
 ) -> Any:
     agent = HRAgent(db, tenant_id)
@@ -105,6 +110,7 @@ async def candidate_outreach(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.HR, Action.CREATE)),
     request: OutreachRequest
 ) -> Any:
     agent = HRAgent(db, tenant_id)
@@ -130,6 +136,7 @@ async def schedule_interview(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.HR, Action.CREATE)),
     request: InterviewRequest
 ) -> Any:
     agent = HRAgent(db, tenant_id)
@@ -153,6 +160,7 @@ def update_candidate_status(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.HR, Action.CREATE)),
     request: StatusUpdateRequest
 ) -> Any:
     candidate = db.query(models.Candidate).filter(
@@ -173,6 +181,7 @@ def delete_candidate(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.HR, Action.DELETE)),
 ) -> Any:
     candidate = db.query(models.Candidate).filter(
         models.Candidate.id == candidate_id,

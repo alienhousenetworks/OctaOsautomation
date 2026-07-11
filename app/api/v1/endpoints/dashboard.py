@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from typing import Any, List, Optional, Dict
 from pydantic import BaseModel
 from app.api import deps
+from app.core.rbac import Action, Resource, require_permission
+from app.models.base import User
 from app.models.teams import AITeam, InstalledApp, AgentMetric
 
 router = APIRouter()
@@ -161,6 +163,7 @@ def create_ai_team(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.CREATE)),
     request: TeamCreate
 ) -> Any:
     team = AITeam(
@@ -180,6 +183,7 @@ def update_ai_team(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.UPDATE)),
     request: TeamUpdate
 ) -> Any:
     team = db.query(AITeam).filter(AITeam.id == team_id, AITeam.tenant_id == tenant_id).first()
@@ -218,6 +222,7 @@ async def test_agent(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.CREATE)),
     request: AgentTestRequest
 ) -> Any:
     from app.services.ai_gateway import ai_gateway
@@ -255,6 +260,7 @@ def install_workflow(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.CREATE)),
     request: MarketplaceInstall
 ) -> Any:
     from app.models.workflows import Workflow, WorkflowTask
@@ -298,6 +304,7 @@ def uninstall_workflow(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.CREATE)),
     request: MarketplaceInstall
 ) -> Any:
     app = db.query(InstalledApp).filter(

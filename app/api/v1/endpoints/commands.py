@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from typing import Any, List, Optional
 from pydantic import BaseModel
 from app.api import deps
+from app.core.rbac import Action, Resource, require_permission
+from app.models.base import User
 from app.services.agents.orchestrator import OrchestratorAgent
 from app.models.base import APICredential
 from app.models.verticals import ContentPost, Lead
@@ -31,6 +33,7 @@ async def execute_command(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.CREATE)),
     request: CommandRequest
 ) -> Any:
     # 1. Check if user has a primary AI key (for selected provider, or fallback to any primary)
@@ -102,6 +105,7 @@ def update_api_key(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.CREATE)),
     request: APIKeyUpdate
 ) -> Any:
     from app.services.security_service import SecretValidationService
@@ -256,6 +260,7 @@ def add_knowledge_doc(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.CREATE)),
     request: KnowledgeDocCreate
 ) -> Any:
     doc = KnowledgeDocument(
@@ -281,6 +286,7 @@ async def upload_knowledge_file(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.CREATE)),
     file: UploadFile = File(...),
     department: str = Form(...),
     doc_type: str = Form(...)

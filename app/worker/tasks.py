@@ -836,12 +836,46 @@ def run_sales_v3_task(tenant_id: str, provider: str = "gemini", model: str = Non
 @celery_app.task(name="dead_letter_handler")
 def dead_letter_handler(task_name: str, task_id: str, exception: str, args: str, kwargs: str):
     import logging
+    import ast
+    from app.db.session import SessionLocal
+    from app.services.durable_workflows import DeadLetterService
+
     logger = logging.getLogger(__name__)
     logger.error(
         f"[DLQ EVENT] Celery task '{task_name}' (ID: {task_id}) failed. "
         f"Exception: {exception}. Args: {args}, Kwargs: {kwargs}"
     )
-    return {"status": "DLQ_RECORDED", "task_id": task_id}
+    db = SessionLocal()
+    try:
+        parsed_args = []
+        parsed_kwargs = {}
+        try:
+            parsed_args = list(ast.literal_eval(args)) if args else []
+        except Exception:
+            parsed_args = [args]
+        try:
+            parsed_kwargs = dict(ast.literal_eval(kwargs)) if kwargs else {}
+        except Exception:
+            parsed_kwargs = {"raw": kwargs}
+        tenant_id = None
+        if parsed_args and isinstance(parsed_args[0], str):
+            tenant_id = parsed_args[0]
+        elif isinstance(parsed_kwargs, dict):
+            tenant_id = parsed_kwargs.get("tenant_id")
+        DeadLetterService(db).record(
+            task_name=task_name,
+            task_id=task_id,
+            args=parsed_args,
+            kwargs=parsed_kwargs,
+            error=exception,
+            tenant_id=tenant_id,
+        )
+        return {"status": "DLQ_RECORDED", "task_id": task_id, "persisted": True}
+    except Exception as e:
+        logger.error(f"Failed to persist DLQ job: {e}")
+        return {"status": "DLQ_RECORDED", "task_id": task_id, "persisted": False}
+    finally:
+        db.close()
 
 
 

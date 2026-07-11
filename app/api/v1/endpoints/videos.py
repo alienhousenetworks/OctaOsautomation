@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Any, List, Optional
 from app.api import deps
+from app.core.rbac import Action, Resource, require_permission
+from app.models.base import User
 from pydantic import BaseModel
 from app.models.video import VideoProject, VideoAsset, VideoRender
 from app.models.agents import ActivityLog

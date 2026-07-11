@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import {
   Activity, Users, DollarSign, BarChart3, Briefcase, Zap, BookOpen,
   LogOut, Calendar, MessageSquare, Clock, TrendingUp, Target, FileText, Key, Video,
-  Menu, X, ChevronRight, Settings2, UserCircle
+  Menu, X, ChevronRight, Settings2, UserCircle, Shield
 } from 'lucide-react';
 
 import KnowledgeView from '@/components/views/knowledge-view';
@@ -29,6 +29,7 @@ import SystemAdminView from '@/components/views/system-admin-view';
 import ApiManagementView from '@/components/views/api-management-view';
 import VideoStudioView from '@/components/views/video-studio-view';
 import ProfileView from '@/components/views/profile-view';
+import EnterpriseView from '@/components/views/enterprise-view';
 
 import LandingPage from '@/components/landing-page';
 import AuthForms from '@/components/auth-forms';
@@ -74,6 +75,7 @@ const NAV_GROUPS = [
     label: 'System',
     items: [
       { id: 'api_management', name: 'API Management', icon: Key, color: '#8b5cf6', section: 'system' },
+      { id: 'enterprise', name: 'Enterprise Control', icon: Shield, color: '#fbbf24', section: 'system' },
     ],
   },
   {
@@ -796,6 +798,10 @@ export default function Home() {
               fetchData={fetchData}
               metrics={metrics}
             />
+          </div>
+
+          <div className={activeView === 'enterprise' ? 'block animate-fade-in-up' : 'hidden'}>
+            {token && <EnterpriseView token={token} />}
           </div>
 
           <div className={activeView === 'api_management' ? 'block animate-fade-in-up' : 'hidden'}>

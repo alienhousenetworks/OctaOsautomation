@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Any, Dict
 from app.api import deps
+from app.core.rbac import Action, Resource, require_permission
+from app.models.base import User
 from app.models.base import ProviderUsage, AIBatchJob, APICredential
 from app.services.ai_gateway import ai_gateway
 
@@ -11,6 +13,7 @@ router = APIRouter()
 def read_usage(
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.READ)),
     skip: int = 0,
     limit: int = 100
 ) -> Any:
@@ -167,6 +170,7 @@ async def create_batch_job(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.SETTINGS, Action.CREATE)),
     request: BatchCreateRequest
 ) -> Any:
     job = await ai_gateway.executeBatch(db, tenant_id, request.tasks, request.provider, request.model)

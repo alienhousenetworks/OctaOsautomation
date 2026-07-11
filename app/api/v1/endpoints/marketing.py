@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from asgiref.sync import async_to_sync
 
 from app.api import deps
+from app.core.rbac import Action, Resource, require_permission
+from app.models.base import User
 from app.schemas import verticals as schemas
 from app.models import verticals as models
 
@@ -28,6 +30,7 @@ async def generate_content(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.EXECUTE)),
     topic: str,
     platform: str = "linkedin",
 ) -> Any:
@@ -42,6 +45,7 @@ async def generate_content(
 def read_posts(
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.READ)),
     skip: int = 0,
     limit: int = 100,
 ) -> Any:
@@ -61,6 +65,7 @@ def trigger_campaign(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.CREATE)),
     campaign_in: schemas.CampaignCreate,
 ) -> Any:
     from app.worker.tasks import generate_campaign_task
@@ -74,6 +79,7 @@ def update_post(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.UPDATE)),
     post_id: str,
     post_in: schemas.ContentPostBase,
 ) -> Any:
@@ -126,6 +132,7 @@ def create_manual_post(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.CREATE)),
     post_in: schemas.ContentPostCreate,
 ) -> Any:
     post = models.ContentPost(
@@ -161,6 +168,7 @@ async def upload_media(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.CREATE)),
     file: UploadFile = File(...),
 ) -> Any:
     from app.services.media.storage import _write_bytes
@@ -174,6 +182,7 @@ async def generate_media_for_post(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.CREATE)),
     post_id: str,
     req: GenerateMediaRequest,
 ) -> Any:
@@ -270,6 +279,7 @@ async def suggest_prompt(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.CREATE)),
     req: SuggestPromptRequest,
 ) -> Any:
     from app.services.llm_gateway import LLMGateway
@@ -318,6 +328,7 @@ def approve_post(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.EXECUTE)),
     post_id: str,
     options: ApproveOptions = ApproveOptions(),
 ) -> Any:
@@ -346,6 +357,7 @@ def publish_post_now(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.EXECUTE)),
     post_id: str,
 ) -> Any:
     post = (
@@ -374,6 +386,7 @@ def reject_post(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.EXECUTE)),
     post_id: str,
 ) -> Any:
     post = (
@@ -395,6 +408,7 @@ def approve_all_posts(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.EXECUTE)),
     options: ApproveOptions = ApproveOptions(),
 ) -> Any:
     posts = (
@@ -430,6 +444,7 @@ def bulk_schedule_posts(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.CREATE)),
     req: BulkScheduleRequest,
 ) -> Any:
     if req.end_date < req.start_date:

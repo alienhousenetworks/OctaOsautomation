@@ -10,9 +10,21 @@ from pydantic import BaseModel, EmailStr
 
 from app.api import deps
 from app.core.config import settings
-from app.core.security import verify_password, get_password_hash, create_access_token
+from app.core.security import (
+    verify_password,
+    get_password_hash,
+    create_access_token,
+    create_token_pair,
+    hash_token,
+    encrypt_api_key,
+    decrypt_api_key,
+    generate_mfa_secret,
+    verify_totp,
+)
 from app.models.base import User, Tenant, Invitation
+from app.models.enterprise import RefreshToken, MFASecret
 from app.services.email.sender import send_global_smtp_email
+from app.services.subscription_service import SubscriptionService
 
 router = APIRouter()
 
@@ -28,6 +40,20 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     tenant_id: Optional[str] = None
+    refresh_token: Optional[str] = None
+    expires_in: Optional[int] = None
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class MFAEnableRequest(BaseModel):
+    enable: bool = True
+
+
+class MFAVerifyRequest(BaseModel):
+    code: str
 
 class UserCreate(BaseModel):
     email: EmailStr
@@ -112,9 +138,55 @@ def signup(
     db.commit()
     db.refresh(user)
 
-    # Generate token
-    access_token = create_access_token(subject=user.id, tenant_id=user.tenant_id, organization_id=user.organization_id)
-    return {"access_token": access_token, "token_type": "bearer", "tenant_id": user.tenant_id}
+    try:
+        SubscriptionService(db).ensure_trial(user.tenant_id)
+    except Exception:
+        pass
+    access, refresh_raw, refresh_exp = create_token_pair(
+        subject=user.id, tenant_id=user.tenant_id, organization_id=user.organization_id
+    )
+    db.add(
+        RefreshToken(
+            user_id=user.id,
+            tenant_id=user.tenant_id,
+            token_hash=hash_token(refresh_raw),
+            expires_at=refresh_exp,
+        )
+    )
+    db.commit()
+    return {
+        "access_token": access,
+        "token_type": "bearer",
+        "tenant_id": user.tenant_id,
+        "refresh_token": refresh_raw,
+        "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    }
+
+
+def _issue_tokens(db: Session, user: User) -> dict:
+    access, refresh_raw, refresh_exp = create_token_pair(
+        subject=user.id, tenant_id=user.tenant_id, organization_id=user.organization_id
+    )
+    db.add(
+        RefreshToken(
+            user_id=user.id,
+            tenant_id=user.tenant_id,
+            token_hash=hash_token(refresh_raw),
+            expires_at=refresh_exp,
+        )
+    )
+    db.commit()
+    try:
+        SubscriptionService(db).ensure_trial(user.tenant_id)
+    except Exception:
+        pass
+    return {
+        "access_token": access,
+        "token_type": "bearer",
+        "tenant_id": user.tenant_id,
+        "refresh_token": refresh_raw,
+        "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    }
 
 
 @router.post("/login", response_model=Token, dependencies=[Depends(rate_limit_endpoint(limit=5, window_seconds=60))])
@@ -127,14 +199,142 @@ def login(
         raise HTTPException(status_code=400, detail="Incorrect email or password")
     elif not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
-    
-    # Simple form login sets user as verified to allow Swagger and testing to run seamlessly
-    user.is_verified = True
-    db.add(user)
+
+    # Dev convenience only — do not auto-verify in production
+    if settings.DEV or settings.ENVIRONMENT in ("development", "dev", "local", "test"):
+        user.is_verified = True
+        db.add(user)
+        db.commit()
+    elif not getattr(user, "is_verified", False):
+        raise HTTPException(status_code=403, detail="Unverified user")
+
+    # MFA gate when enabled
+    mfa = db.query(MFASecret).filter(MFASecret.user_id == user.id, MFASecret.enabled == True).first()  # noqa: E712
+    if mfa or settings.MFA_REQUIRED:
+        # Allow password login to return a limited token type only after MFA —
+        # clients must call /auth/mfa/verify with code. For OAuth2 form compat,
+        # accept optional code in password field as "password|otp" when MFA on.
+        if "|" in (form_data.password or ""):
+            _, code = form_data.password.rsplit("|", 1)
+            secret = decrypt_api_key(mfa.secret_encrypted) if mfa else None
+            if not secret or not verify_totp(secret, code.strip()):
+                raise HTTPException(status_code=401, detail="Invalid MFA code")
+        elif mfa and mfa.enabled:
+            raise HTTPException(
+                status_code=401,
+                detail="MFA required. Re-submit password as password|otp_code or use /auth/mfa/verify",
+            )
+
+    return _issue_tokens(db, user)
+
+
+@router.post("/refresh", response_model=Token)
+def refresh_token(body: RefreshRequest, db: Session = Depends(deps.get_db)) -> Any:
+    th = hash_token(body.refresh_token)
+    row = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.token_hash == th, RefreshToken.revoked_at.is_(None))
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    exp = row.expires_at
+    if exp.tzinfo is not None:
+        exp = exp.replace(tzinfo=None)
+    if exp < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+    user = db.query(User).filter(User.id == row.user_id).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="User inactive")
+    # rotate
+    row.revoked_at = datetime.utcnow()
     db.commit()
-    
-    access_token = create_access_token(subject=user.id, tenant_id=user.tenant_id, organization_id=user.organization_id)
-    return {"access_token": access_token, "token_type": "bearer", "tenant_id": user.tenant_id}
+    return _issue_tokens(db, user)
+
+
+@router.post("/logout")
+def logout(
+    body: RefreshRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+) -> Any:
+    th = hash_token(body.refresh_token)
+    row = (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.token_hash == th,
+            RefreshToken.user_id == current_user.id,
+            RefreshToken.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if row:
+        row.revoked_at = datetime.utcnow()
+        db.commit()
+    return {"status": "logged_out"}
+
+
+@router.post("/mfa/setup")
+def mfa_setup(
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+) -> Any:
+    secret = generate_mfa_secret()
+    existing = db.query(MFASecret).filter(MFASecret.user_id == current_user.id).first()
+    if existing:
+        existing.secret_encrypted = encrypt_api_key(secret)
+        existing.enabled = False
+    else:
+        db.add(
+            MFASecret(
+                user_id=current_user.id,
+                secret_encrypted=encrypt_api_key(secret),
+                enabled=False,
+            )
+        )
+    db.commit()
+    return {
+        "secret": secret,
+        "otpauth_uri": f"otpauth://totp/OctaOS:{current_user.email}?secret={secret}&issuer=OctaOS",
+        "enabled": False,
+        "message": "Confirm with /auth/mfa/enable after verifying a code",
+    }
+
+
+@router.post("/mfa/enable")
+def mfa_enable(
+    body: MFAVerifyRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+) -> Any:
+    row = db.query(MFASecret).filter(MFASecret.user_id == current_user.id).first()
+    if not row:
+        raise HTTPException(400, "Call /auth/mfa/setup first")
+    secret = decrypt_api_key(row.secret_encrypted)
+    if not verify_totp(secret, body.code):
+        raise HTTPException(400, "Invalid MFA code")
+    row.enabled = True
+    db.commit()
+    return {"enabled": True}
+
+
+@router.get("/sso/oidc/login")
+def sso_oidc_login() -> Any:
+    """Optional OIDC redirect — configure OIDC_* env vars for enterprise SSO."""
+    if not settings.OIDC_DISCOVERY_URL or not settings.OIDC_CLIENT_ID:
+        raise HTTPException(
+            status_code=501,
+            detail="SSO not configured. Set OIDC_DISCOVERY_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_REDIRECT_URI.",
+        )
+    # Discovery-based authorize URL construction is environment-specific;
+    # return configuration for the frontend to complete the flow.
+    return {
+        "client_id": settings.OIDC_CLIENT_ID,
+        "discovery_url": settings.OIDC_DISCOVERY_URL,
+        "redirect_uri": settings.OIDC_REDIRECT_URI,
+        "scope": "openid profile email",
+        "status": "configured",
+    }
 
 
 # --- NEW OTP FLOWS ---

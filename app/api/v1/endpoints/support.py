@@ -4,8 +4,19 @@ from typing import List, Optional, Any
 from pydantic import BaseModel
 
 from app.api import deps
+from app.core.config import settings
+from app.core.rbac import Action, Resource, require_permission
+from app.models.base import User
 from app.models.verticals import Ticket, TicketMessage
 from app.models.base import APICredential
+from app.services.webhook_security import (
+    check_and_store_idempotency,
+    ensure_tenant_active,
+    payload_sha256,
+    verify_email_hmac,
+    verify_meta_signature,
+    verify_whatsapp_token,
+)
 
 router = APIRouter()
 
@@ -25,7 +36,8 @@ class EmailWebhookRequest(BaseModel):
 @router.get("/tickets")
 def get_tickets(
     db: Session = Depends(deps.get_db),
-    tenant_id: str = Depends(deps.get_current_tenant_id)
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.TICKETS, Action.READ)),
 ) -> Any:
     tickets = db.query(Ticket).filter(Ticket.tenant_id == tenant_id).order_by(Ticket.created_at.desc()).all()
     return tickets
@@ -126,21 +138,40 @@ def save_support_settings(
 @router.get("/whatsapp/webhook/{tenant_id}")
 def verify_whatsapp_webhook(
     tenant_id: str,
+    db: Session = Depends(deps.get_db),
     hub_mode: Optional[str] = Query(None, alias="hub.mode"),
     hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
-    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token")
+    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
 ) -> Any:
+    ensure_tenant_active(db, tenant_id)
     if hub_mode == "subscribe" and hub_challenge:
-        # In a production app we verify hub_verify_token matches configured credentials
+        if not verify_whatsapp_token(db, tenant_id, hub_verify_token):
+            raise HTTPException(status_code=403, detail="Invalid verify token")
         return int(hub_challenge) if hub_challenge.isdigit() else hub_challenge
     return "Invalid webhook verification request"
+
 
 @router.post("/whatsapp/webhook/{tenant_id}")
 async def receive_whatsapp_webhook(
     tenant_id: str,
-    payload: dict,
-    db: Session = Depends(deps.get_db)
+    request: Request,
+    db: Session = Depends(deps.get_db),
 ) -> Any:
+    ensure_tenant_active(db, tenant_id)
+    raw = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256")
+    if settings.META_APP_SECRET:
+        if not verify_meta_signature(settings.META_APP_SECRET, raw, sig):
+            raise HTTPException(status_code=403, detail="Invalid webhook signature")
+    elif not settings.DEV:
+        raise HTTPException(status_code=503, detail="META_APP_SECRET not configured")
+
+    import json
+    try:
+        payload = json.loads(raw.decode("utf-8") or "{}")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
     try:
         entry = payload.get("entry", [])[0]
         change = entry.get("changes", [])[0]
@@ -148,6 +179,15 @@ async def receive_whatsapp_webhook(
         messages = value.get("messages", [])
         if messages:
             msg = messages[0]
+            event_id = msg.get("id") or payload_sha256(raw)
+            if not check_and_store_idempotency(
+                db,
+                tenant_id=tenant_id,
+                provider="whatsapp",
+                event_id=str(event_id),
+                payload_hash=payload_sha256(raw),
+            ):
+                return {"status": "duplicate"}
             sender = msg.get("from")
             text_body = msg.get("text", {}).get("body", "")
             if sender and text_body:
@@ -159,42 +199,91 @@ async def receive_whatsapp_webhook(
                     content=text_body,
                     external_id=msg.get("id"),
                 )
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error parsing WhatsApp webhook: {e}")
     return {"status": "ok"}
+
 
 @router.post("/email/webhook/{tenant_id}")
 async def receive_email_webhook(
     tenant_id: str,
     request: Request,
-    db: Session = Depends(deps.get_db)
+    db: Session = Depends(deps.get_db),
 ) -> Any:
     from app.services.agents.support import SupportAgent
-    
+
+    ensure_tenant_active(db, tenant_id)
+    raw = await request.body()
+    sig = (
+        request.headers.get("X-Octa-Signature")
+        or request.headers.get("X-Hub-Signature-256")
+        or request.headers.get("X-Signature")
+    )
+    # Per-tenant secret from API credentials settings, else global
+    secret = settings.EMAIL_WEBHOOK_HMAC_SECRET
+    cred = (
+        db.query(APICredential)
+        .filter(
+            APICredential.tenant_id == tenant_id,
+            APICredential.provider.in_(["email_webhook", "smtp", "support"]),
+        )
+        .first()
+    )
+    if cred and cred.settings and cred.settings.get("webhook_hmac_secret"):
+        secret = cred.settings.get("webhook_hmac_secret")
+    if secret:
+        if not verify_email_hmac(secret, raw, sig):
+            raise HTTPException(status_code=403, detail="Invalid email webhook signature")
+    elif not settings.DEV:
+        raise HTTPException(status_code=503, detail="Email webhook HMAC secret not configured")
+
     sender = None
     subject = None
     content = None
     external_id = None
 
     content_type = request.headers.get("content-type", "")
-    if content_type.startswith("multipart/form-data") or content_type.startswith("application/x-www-form-urlencoded"):
+    if content_type.startswith("multipart/form-data") or content_type.startswith(
+        "application/x-www-form-urlencoded"
+    ):
+        # Re-parse from body is hard; use form after signature check on raw
         form_data = await request.form()
         sender = form_data.get("sender") or form_data.get("from")
         subject = form_data.get("subject", "")
-        content = form_data.get("stripped-text") or form_data.get("body-plain") or form_data.get("text") or form_data.get("body-html") or form_data.get("html")
+        content = (
+            form_data.get("stripped-text")
+            or form_data.get("body-plain")
+            or form_data.get("text")
+            or form_data.get("body-html")
+            or form_data.get("html")
+        )
         external_id = form_data.get("Message-Id") or form_data.get("message-id")
     else:
         try:
-            json_data = await request.json()
+            import json
+            json_data = json.loads(raw.decode("utf-8") or "{}")
             sender = json_data.get("sender") or json_data.get("from")
             subject = json_data.get("subject", "")
-            content = json_data.get("stripped-text") or json_data.get("body-plain") or json_data.get("content") or json_data.get("text")
+            content = (
+                json_data.get("stripped-text")
+                or json_data.get("body-plain")
+                or json_data.get("content")
+                or json_data.get("text")
+            )
             external_id = json_data.get("message_id") or json_data.get("Message-Id")
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid payload")
 
     if not sender or not content:
         raise HTTPException(status_code=400, detail="Missing sender or content")
+
+    eid = str(external_id or payload_sha256(raw))
+    if not check_and_store_idempotency(
+        db, tenant_id=tenant_id, provider="email", event_id=eid, payload_hash=payload_sha256(raw)
+    ):
+        return {"status": "duplicate"}
 
     agent = SupportAgent(db, tenant_id)
     try:

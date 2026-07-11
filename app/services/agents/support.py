@@ -152,14 +152,22 @@ class SupportAgent(BaseAgent):
         self.db.commit()
         self.db.refresh(message)
 
-        # 4. If auto-reply is enabled, queue celery task
+        # 4. If auto-reply is enabled, queue celery task with human-like delay
         if self.is_auto_reply_enabled(channel):
-            # Send task to Celery
-            celery_app.send_task(
-                "auto_reply_task",
-                args=[self.tenant_id, ticket.id, message.id, channel]
-            )
-            self.log_activity("Auto-Reply Queued", f"Queued support response for ticket #{ticket.id[:8]}.")
+            # WhatsApp ~4–5 min; Email ~20 min (product SLA)
+            delay_seconds = 270 if channel == "whatsapp" else 1200 if channel == "email" else 180
+            if ticket.status == "human_handling":
+                self.log_activity("Auto-Reply Skipped", f"Ticket #{ticket.id[:8]} under human takeover.")
+            else:
+                celery_app.send_task(
+                    "auto_reply_task",
+                    args=[self.tenant_id, ticket.id, message.id, channel],
+                    countdown=delay_seconds,
+                )
+                self.log_activity(
+                    "Auto-Reply Queued",
+                    f"Queued support response for ticket #{ticket.id[:8]} in {delay_seconds}s.",
+                )
 
         return {
             "status": "success",
@@ -172,7 +180,7 @@ class SupportAgent(BaseAgent):
         if not ticket:
             return
 
-        if ticket.status in ("resolved", "closed"):
+        if ticket.status in ("resolved", "closed", "human_handling"):
             self.log_activity("Auto-Reply Cancelled", f"Ticket #{ticket.id[:8]} status is {ticket.status}.")
             return
 
@@ -191,45 +199,98 @@ class SupportAgent(BaseAgent):
             self.log_activity("Auto-Reply Cancelled", f"A reply has already been sent by agent for ticket #{ticket.id[:8]}.")
             return
 
-        # Generate response using LLM
-        knowledge = self.get_knowledge_context("Support")
-        messages = self.db.query(TicketMessage).filter(TicketMessage.ticket_id == ticket_id).order_by(TicketMessage.created_at.asc()).all()
-        
-        history_str = ""
-        for m in messages:
-            history_str += f"{m.sender.upper()}: {m.content}\n"
+        # KB-gated answer with citations / refuse mode
+        from app.services.kb_rag import KnowledgeRAGService
+        from app.services.policy_engine import PolicyEngine
+        from app.services.subscription_service import SubscriptionService
 
-        system_prompt = (
-            "You are a helpful, professional, and empathetic customer support agent. "
-            "Your replies should be concise, human-like, and natural. Do not mention that you are an AI or bot. "
-            "Rely strictly on the provided Company Guidelines & Knowledge Base to answer the customer's query. "
-            "If the information is not in the knowledge base, politely inform the customer that you are escalating the issue to a specialist."
-        )
-        prompt = (
-            f"Customer Conversation History:\n{history_str}\n"
-            f"{knowledge}\n"
-            "Draft the final response from the agent to the customer."
-        )
+        budget = SubscriptionService(self.db).check_action_allowed(self.tenant_id)
+        if not budget.get("allowed"):
+            self.log_activity("Auto-Reply Blocked", f"Budget/quota: {budget.get('reason')}")
+            return
 
-        reply_content = await self.llm.complete(
-            prompt=prompt,
-            model=None,
-            provider="gemini",
-            system_prompt=system_prompt
+        last_customer = trigger_msg.content or ""
+        kb = KnowledgeRAGService(self.db, self.tenant_id).answer_context(
+            last_customer, department="Support"
         )
+        if not kb.get("answer_allowed"):
+            reply_content = kb.get("message") or (
+                "Thank you for reaching out. I'm escalating this to a specialist who can help."
+            )
+            citations = []
+        else:
+            knowledge = kb.get("context") or self.get_knowledge_context("Support")
+            citations = kb.get("citations") or []
+            messages = self.db.query(TicketMessage).filter(
+                TicketMessage.ticket_id == ticket_id
+            ).order_by(TicketMessage.created_at.asc()).all()
 
-        # Save response
+            history_str = ""
+            for m in messages:
+                history_str += f"{m.sender.upper()}: {m.content}\n"
+
+            system_prompt = (
+                "You are a helpful, professional, and empathetic customer support agent. "
+                "Your replies should be concise, human-like, and natural. Do not mention that you are an AI or bot. "
+                "Rely strictly on the provided Company Guidelines & Knowledge Base. "
+                "If the information is not in the knowledge base, say you will escalate to a specialist. "
+                "When you use knowledge, you may cite sources by their citation tags."
+            )
+            prompt = (
+                f"Customer Conversation History:\n{history_str}\n"
+                f"Knowledge Base (with citations):\n{knowledge}\n"
+                "Draft the final response from the agent to the customer."
+            )
+
+            reply_content = await self.llm.complete(
+                prompt=prompt,
+                model=None,
+                provider="gemini",
+                system_prompt=system_prompt,
+            )
+            if citations:
+                reply_content = f"{reply_content}\n\nSources: " + "; ".join(citations[:3])
+
+        # Policy: support replies go through HITL unless auto_with_rules
+        decision = PolicyEngine(self.db, self.tenant_id).evaluate(
+            action_type="support_auto_reply",
+            channel=channel,
+            agent_name="Support AI",
+            confidence=0.9 if kb.get("mode") == "grounded" else 0.5,
+            brand_pass=True,
+            title=f"Support reply ticket {ticket.id[:8]}",
+            payload={"draft": reply_content, "ticket_id": ticket.id, "channel": channel},
+            resource_type="ticket",
+            resource_id=ticket.id,
+            requested_by="Support AI",
+        )
+        if decision.get("decision") == "block":
+            self.log_activity("Auto-Reply Blocked", decision.get("reason", "policy"))
+            return
+        if decision.get("decision") == "queue_approval":
+            # Save draft as internal note without sending
+            draft_msg = TicketMessage(
+                ticket_id=ticket.id,
+                sender="agent",
+                content=f"[PENDING APPROVAL {decision.get('approval_id')}]\n{reply_content}",
+            )
+            self.db.add(draft_msg)
+            self.db.commit()
+            self.log_activity("Auto-Reply Queued for Approval", f"Ticket #{ticket.id[:8]}")
+            return
+
+        # Save + send
         reply_message = TicketMessage(
             ticket_id=ticket.id,
             sender="agent",
-            content=reply_content
+            content=reply_content,
         )
         self.db.add(reply_message)
         self.db.commit()
         self.db.refresh(reply_message)
 
-        # Send response
         await self.send_message(channel, ticket.customer_contact, reply_content)
+        SubscriptionService(self.db).record_action(self.tenant_id, cost_usd=0.0, count=1)
         self.log_activity("Auto-Reply Sent", f"Auto-reply sent for ticket #{ticket.id[:8]} via {channel}.")
 
     @with_retry

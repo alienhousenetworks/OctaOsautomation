@@ -6,6 +6,8 @@ import csv
 import io
 import json
 from app.api import deps
+from app.core.rbac import Action, Resource, require_permission
+from app.models.base import User
 from app.schemas import verticals as schemas
 from app.models import verticals as models
 from app.services.verticals.sales import SalesService
@@ -19,6 +21,7 @@ async def create_lead(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.LEADS, Action.CREATE)),
     lead_in: schemas.LeadCreate
 ) -> Any:
     lead = models.Lead(**lead_in.dict(), tenant_id=tenant_id)
@@ -35,6 +38,7 @@ async def create_lead(
 def read_leads(
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.LEADS, Action.READ)),
     status: Optional[str] = None,
     priority: Optional[str] = None,
     search: Optional[str] = None,
@@ -77,6 +81,7 @@ def update_lead(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.LEADS, Action.UPDATE)),
     lead_id: str,
     lead_in: dict
 ) -> Any:
@@ -197,6 +202,7 @@ async def upload_leads(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.LEADS, Action.CREATE)),
     file: UploadFile = File(...),
     handle_with_ai: bool = Form(False)
 ) -> Any:
@@ -390,6 +396,7 @@ def update_business_profile(
     *,
     db: Session = Depends(deps.get_db),
     tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.LEADS, Action.CREATE)),
     profile_in: schemas.BusinessProfileCreate
 ) -> Any:
     profile = db.query(models.BusinessProfile).filter(models.BusinessProfile.tenant_id == tenant_id).first()
