@@ -254,6 +254,8 @@ cd "$APP_DIR"
 
 if git rev-parse --git-dir &>/dev/null; then
   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  info "Updating Git remote origin URL..."
+  git remote set-url origin https://github.com/alienhousenetworks/OctaOsautomation.git || warn "Failed to update Git remote origin URL"
   info "Fetching latest changes from Git..."
   git fetch --all
   info "Pulling latest from branch: $BRANCH"
