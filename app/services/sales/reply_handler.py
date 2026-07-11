@@ -14,15 +14,33 @@ from app.services.sales.meeting_booking import book_meeting_for_lead
 
 
 
-def sales_auto_reply_enabled(db: Session, tenant_id: str) -> bool:
+def _sales_settings(db: Session, tenant_id: str) -> dict:
     cred = (
         db.query(APICredential)
         .filter_by(tenant_id=tenant_id, provider="sales")
         .first()
     )
-    if cred and cred.settings is not None:
-        return cred.settings.get("sales_auto_reply", True)
-    return True
+    base = {
+        "sales_auto_reply": True,
+        "reply_mode": "review_first",
+        "auto_book_meetings": True,
+    }
+    if cred and cred.settings:
+        base.update(cred.settings)
+    return base
+
+
+def sales_auto_reply_enabled(db: Session, tenant_id: str) -> bool:
+    return bool(_sales_settings(db, tenant_id).get("sales_auto_reply", True))
+
+
+def sales_reply_mode(db: Session, tenant_id: str) -> str:
+    mode = str(_sales_settings(db, tenant_id).get("reply_mode") or "review_first").lower()
+    return mode if mode in ("review_first", "auto_send") else "review_first"
+
+
+def sales_auto_book_meetings(db: Session, tenant_id: str) -> bool:
+    return bool(_sales_settings(db, tenant_id).get("auto_book_meetings", True))
 
 
 class SalesReplyHandler(BaseAgent):
@@ -140,7 +158,11 @@ class SalesReplyHandler(BaseAgent):
         self.db.commit()
 
         booked = False
-        if parsed.get("interested") and lead.status != "meeting_scheduled":
+        if (
+            parsed.get("interested")
+            and lead.status != "meeting_scheduled"
+            and sales_auto_book_meetings(self.db, self.tenant_id)
+        ):
             booked = book_meeting_for_lead(
                 self.db,
                 self.tenant_id,
@@ -151,29 +173,61 @@ class SalesReplyHandler(BaseAgent):
             )
 
         auto_reply = parsed.get("should_auto_reply", True)
-        if sales_auto_reply_enabled(self.db, self.tenant_id) and auto_reply and parsed.get("suggested_reply"):
-            from app.core.celery_app import celery_app
+        suggested = parsed.get("suggested_reply")
+        if sales_auto_reply_enabled(self.db, self.tenant_id) and auto_reply and suggested:
+            mode = sales_reply_mode(self.db, self.tenant_id)
+            if mode == "review_first":
+                # Human must approve draft before send
+                from app.services.policy_engine import PolicyEngine
+                decision = PolicyEngine(self.db, self.tenant_id).evaluate(
+                    action_type="first_touch_email" if channel in ("email", "smtp", "gmail") else "sales_auto_reply",
+                    channel=channel,
+                    agent_name="Sales AI",
+                    confidence=0.7,
+                    brand_pass=True,
+                    title=f"Sales reply to {lead.name} ({lead.company})",
+                    payload={
+                        "draft": suggested,
+                        "lead_id": lead.id,
+                        "channel": channel,
+                        "intent": parsed.get("intent"),
+                    },
+                    resource_type="lead",
+                    resource_id=lead.id,
+                    requested_by="Sales AI",
+                )
+                data["pending_review_reply"] = suggested
+                data["approval_id"] = decision.get("approval_id")
+                lead.data = data
+                self.db.commit()
+                self.log_activity(
+                    "Sales Reply Awaiting Review",
+                    f"Draft for {lead.name} queued for human approval ({decision.get('decision')}).",
+                    "success",
+                )
+            else:
+                from app.core.celery_app import celery_app
 
-            delay = 120 if channel == "email" else 60
-            data["pending_auto_reply_for"] = external_id or data.get("last_inbound_at", "")
-            lead.data = data
-            self.db.commit()
-            celery_app.send_task(
-                "sales_auto_reply_task",
-                args=[
-                    self.tenant_id,
-                    lead.id,
-                    channel,
-                    parsed["suggested_reply"],
-                    external_id or data.get("pending_auto_reply_for", ""),
-                ],
-                countdown=delay,
-            )
-            self.log_activity(
-                "Sales Auto-Reply Queued",
-                f"Queued sales follow-up for {lead.name} in {delay}s.",
-                "success",
-            )
+                delay = 120 if channel == "email" else 60
+                data["pending_auto_reply_for"] = external_id or data.get("last_inbound_at", "")
+                lead.data = data
+                self.db.commit()
+                celery_app.send_task(
+                    "sales_auto_reply_task",
+                    args=[
+                        self.tenant_id,
+                        lead.id,
+                        channel,
+                        suggested,
+                        external_id or data.get("pending_auto_reply_for", ""),
+                    ],
+                    countdown=delay,
+                )
+                self.log_activity(
+                    "Sales Auto-Reply Queued",
+                    f"Queued sales follow-up for {lead.name} in {delay}s.",
+                    "success",
+                )
 
         self.log_activity(
             "Prospect Reply Processed",

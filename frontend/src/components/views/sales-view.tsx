@@ -355,6 +355,61 @@ export default function SalesView({
   const [lastReplyCheckResult, setLastReplyCheckResult] = useState<{queued: number; message: string} | null>(null);
   const [outreachSmartResult, setOutreachSmartResult] = useState<any>(null);
 
+  // Review first vs auto-send for prospect replies
+  const [salesSettings, setSalesSettings] = useState({
+    sales_auto_reply: true,
+    reply_mode: 'review_first' as 'review_first' | 'auto_send',
+    auto_book_meetings: true,
+  });
+  const [salesSettingsSaving, setSalesSettingsSaving] = useState(false);
+
+  const fetchSalesSettings = async () => {
+    if (!token) return;
+    try {
+      const res = await fetchWithAuth(`${API_URL}/leads/sales-settings`);
+      if (res.ok) {
+        const data = await res.json();
+        setSalesSettings({
+          sales_auto_reply: data.sales_auto_reply ?? true,
+          reply_mode: data.reply_mode === 'auto_send' ? 'auto_send' : 'review_first',
+          auto_book_meetings: data.auto_book_meetings ?? true,
+        });
+      }
+    } catch (e) {
+      console.error('Failed to fetch sales settings:', e);
+    }
+  };
+
+  const saveSalesSettings = async (next: typeof salesSettings) => {
+    if (!token) return;
+    setSalesSettingsSaving(true);
+    setSalesSettings(next);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/leads/sales-settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(next),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.settings) {
+          setSalesSettings({
+            sales_auto_reply: data.settings.sales_auto_reply ?? next.sales_auto_reply,
+            reply_mode: data.settings.reply_mode === 'auto_send' ? 'auto_send' : 'review_first',
+            auto_book_meetings: data.settings.auto_book_meetings ?? next.auto_book_meetings,
+          });
+        }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || 'Failed to save sales settings');
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSalesSettingsSaving(false);
+    }
+  };
+
   const fetchEmailConfig = async () => {
     if (!token) return;
     try {
@@ -418,6 +473,7 @@ export default function SalesView({
       fetchBusinessProfile();
       fetchWorkflowStatus();
       fetchEmailConfig();
+      fetchSalesSettings();
     }
   }, [token]);
 
@@ -1052,6 +1108,59 @@ export default function SalesView({
                   </Card>
                 ))}
               </div>
+
+              {/* AI automation mode — Review first vs Auto-send */}
+              <Card className="hud-card border border-emerald-500/20 rounded-2xl p-4 bg-gray-950/40 relative z-10">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-400/80">
+                      Prospect reply mode {salesSettingsSaving ? '· saving…' : ''}
+                    </p>
+                    <p className="text-xs text-gray-400 mt-1 max-w-xl">
+                      {salesSettings.reply_mode === 'review_first'
+                        ? 'AI drafts replies to prospects → you approve in Enterprise → Approvals, then send.'
+                        : 'AI auto-replies after a short delay when a prospect messages you.'}
+                    </p>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
+                    <div className="flex rounded-xl overflow-hidden border border-gray-700 min-w-[260px]">
+                      <button
+                        type="button"
+                        onClick={() => saveSalesSettings({ ...salesSettings, reply_mode: 'review_first', sales_auto_reply: true })}
+                        className={`flex-1 px-3 py-2.5 text-xs font-bold transition-colors ${
+                          salesSettings.reply_mode === 'review_first'
+                            ? 'bg-amber-500 text-black'
+                            : 'bg-gray-900 text-gray-300 hover:bg-gray-800'
+                        }`}
+                      >
+                        👁 Review first
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => saveSalesSettings({ ...salesSettings, reply_mode: 'auto_send', sales_auto_reply: true })}
+                        className={`flex-1 px-3 py-2.5 text-xs font-bold transition-colors border-l border-gray-700 ${
+                          salesSettings.reply_mode === 'auto_send'
+                            ? 'bg-emerald-500 text-black'
+                            : 'bg-gray-900 text-gray-300 hover:bg-gray-800'
+                        }`}
+                      >
+                        ⚡ Auto-reply
+                      </button>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer whitespace-nowrap">
+                      <input
+                        type="checkbox"
+                        className="rounded border-gray-600"
+                        checked={salesSettings.auto_book_meetings}
+                        onChange={(e) =>
+                          saveSalesSettings({ ...salesSettings, auto_book_meetings: e.target.checked })
+                        }
+                      />
+                      Auto-book meetings
+                    </label>
+                  </div>
+                </div>
+              </Card>
 
               {/* V3 Sales AI Navigation Tabs */}
               <div className="flex gap-2 p-1 bg-gray-900/60 border border-[rgba(16,185,129,0.2)] rounded-2xl max-w-lg z-10 relative">

@@ -26,8 +26,13 @@ export default function SupportView({
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [replyText, setReplyText] = useState('');
-  const [supportSettings, setSupportSettings] = useState({ whatsapp_auto_reply: true, email_auto_reply: true });
+  const [supportSettings, setSupportSettings] = useState({
+    whatsapp_auto_reply: true,
+    email_auto_reply: true,
+    reply_mode: 'review_first' as 'review_first' | 'auto_send',
+  });
   const [sendingReply, setSendingReply] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
 
   useEffect(() => {
     if (token) {
@@ -74,34 +79,58 @@ export default function SupportView({
     }
   };
 
-    const fetchSupportSettings = async () => {
+  const fetchSupportSettings = async () => {
     if (!token) return;
     try {
       const res = await fetchWithAuth(`${API_URL}/support/settings`);
       if (res.ok) {
         const data = await res.json();
-        setSupportSettings(data);
+        setSupportSettings({
+          whatsapp_auto_reply: data.whatsapp_auto_reply ?? true,
+          email_auto_reply: data.email_auto_reply ?? true,
+          reply_mode: data.reply_mode === 'auto_send' ? 'auto_send' : 'review_first',
+        });
       }
     } catch (e) {
       console.error(e);
     }
   };
 
-    const saveSupportSettings = async (settings: { whatsapp_auto_reply: boolean, email_auto_reply: boolean }) => {
+  const saveSupportSettings = async (settings: {
+    whatsapp_auto_reply: boolean;
+    email_auto_reply: boolean;
+    reply_mode: 'review_first' | 'auto_send';
+  }) => {
     if (!token) return;
+    setSettingsSaving(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/support/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
+        body: JSON.stringify(settings),
       });
       if (res.ok) {
         const data = await res.json();
-        setSupportSettings(data.settings);
+        setSupportSettings({
+          whatsapp_auto_reply: data.settings?.whatsapp_auto_reply ?? settings.whatsapp_auto_reply,
+          email_auto_reply: data.settings?.email_auto_reply ?? settings.email_auto_reply,
+          reply_mode: data.settings?.reply_mode ?? settings.reply_mode,
+        });
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || 'Failed to save support settings');
       }
     } catch (e) {
       console.error(e);
+    } finally {
+      setSettingsSaving(false);
     }
+  };
+
+  const setReplyMode = (mode: 'review_first' | 'auto_send') => {
+    const next = { ...supportSettings, reply_mode: mode };
+    setSupportSettings(next);
+    saveSupportSettings(next);
   };
 
 
@@ -140,19 +169,58 @@ export default function SupportView({
                   <h1 className="text-4xl font-extrabold text-white tracking-tight flex items-center gap-2">
                     <MessageSquare className="text-blue-400 h-8 w-8" /> Customer Support Center
                   </h1>
-                  <p className="text-gray-400 mt-1">Manage omnichannel customer conversations and 24/7 AI auto-reply.</p>
+                  <p className="text-gray-400 mt-1">
+                    Manage tickets · Choose Review first or Auto-send · Approve drafts in Enterprise Control
+                  </p>
                 </div>
                 
-                {/* Auto-Reply Toggles */}
-                <Card className="glass-panel border-transparent shadow-lg p-3.5 flex flex-row gap-6 items-center rounded-2xl bg-gray-900/20">
+                {/* Reply mode + channel toggles */}
+                <Card className="glass-panel border-transparent shadow-lg p-3.5 flex flex-col gap-3 rounded-2xl bg-gray-900/20 min-w-[320px]">
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                      AI reply mode {settingsSaving ? '· saving…' : ''}
+                    </span>
+                    <div className="flex rounded-xl overflow-hidden border border-gray-700">
+                      <button
+                        type="button"
+                        onClick={() => setReplyMode('review_first')}
+                        className={`flex-1 px-3 py-2 text-xs font-bold transition-colors ${
+                          supportSettings.reply_mode === 'review_first'
+                            ? 'bg-amber-500 text-black'
+                            : 'bg-gray-900 text-gray-300 hover:bg-gray-800'
+                        }`}
+                      >
+                        👁 Review first
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReplyMode('auto_send')}
+                        className={`flex-1 px-3 py-2 text-xs font-bold transition-colors border-l border-gray-700 ${
+                          supportSettings.reply_mode === 'auto_send'
+                            ? 'bg-emerald-500 text-black'
+                            : 'bg-gray-900 text-gray-300 hover:bg-gray-800'
+                        }`}
+                      >
+                        ⚡ Auto-send
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-gray-500 leading-snug">
+                      {supportSettings.reply_mode === 'review_first'
+                        ? 'AI drafts replies → you approve in Enterprise → Approvals before send.'
+                        : 'AI can send after delay when confidence is high (still uses kill-switches).'}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-row gap-6 items-center border-t border-gray-800 pt-3">
                   <div className="flex items-center gap-3">
                     <div className="flex flex-col">
-                      <span className="text-xs font-bold text-white">WhatsApp Auto-Reply</span>
-                      <span className="text-[10px] text-gray-400">24/7 AI Responder</span>
+                      <span className="text-xs font-bold text-white">WhatsApp AI</span>
+                      <span className="text-[10px] text-gray-400">Channel on/off</span>
                     </div>
                     <button
                       onClick={() => {
                         const newSettings = { ...supportSettings, whatsapp_auto_reply: !supportSettings.whatsapp_auto_reply };
+                        setSupportSettings(newSettings);
                         saveSupportSettings(newSettings);
                       }}
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
@@ -169,12 +237,13 @@ export default function SupportView({
 
                   <div className="flex items-center gap-3 border-l border-gray-800 pl-6">
                     <div className="flex flex-col">
-                      <span className="text-xs font-bold text-white">Email Auto-Reply</span>
-                      <span className="text-[10px] text-gray-400">24/7 AI Responder</span>
+                      <span className="text-xs font-bold text-white">Email AI</span>
+                      <span className="text-[10px] text-gray-400">Channel on/off</span>
                     </div>
                     <button
                       onClick={() => {
                         const newSettings = { ...supportSettings, email_auto_reply: !supportSettings.email_auto_reply };
+                        setSupportSettings(newSettings);
                         saveSupportSettings(newSettings);
                       }}
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
@@ -187,6 +256,7 @@ export default function SupportView({
                         }`}
                       />
                     </button>
+                  </div>
                   </div>
                 </Card>
               </div>

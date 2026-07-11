@@ -540,6 +540,59 @@ def get_email_config_status(
     }
 
 
+@router.get("/sales-settings")
+def get_sales_settings(
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.LEADS, Action.READ)),
+) -> Any:
+    """Sales automation mode: review_first vs auto_send for prospect replies."""
+    from app.models.base import APICredential
+    defaults = {
+        "sales_auto_reply": True,
+        "reply_mode": "review_first",
+        "auto_book_meetings": True,
+    }
+    cred = db.query(APICredential).filter_by(tenant_id=tenant_id, provider="sales").first()
+    if cred and cred.settings:
+        defaults.update(cred.settings)
+    return defaults
+
+
+@router.post("/sales-settings")
+def save_sales_settings(
+    payload: dict,
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.LEADS, Action.UPDATE)),
+) -> Any:
+    from app.models.base import APICredential
+    mode = str(payload.get("reply_mode") or "review_first").lower()
+    if mode not in ("review_first", "auto_send"):
+        raise HTTPException(400, "reply_mode must be review_first or auto_send")
+    settings = {
+        "sales_auto_reply": bool(payload.get("sales_auto_reply", True)),
+        "reply_mode": mode,
+        "auto_book_meetings": bool(payload.get("auto_book_meetings", True)),
+    }
+    cred = db.query(APICredential).filter_by(tenant_id=tenant_id, provider="sales").first()
+    if not cred:
+        cred = APICredential(
+            tenant_id=tenant_id,
+            provider="sales",
+            encrypted_key="sales_settings",
+            settings=settings,
+        )
+        db.add(cred)
+    else:
+        merged = dict(cred.settings or {})
+        merged.update(settings)
+        cred.settings = merged
+    db.commit()
+    db.refresh(cred)
+    return {"status": "success", "settings": cred.settings}
+
+
 @router.get("/{lead_id}/email-status")
 def get_lead_email_status(
     lead_id: str,

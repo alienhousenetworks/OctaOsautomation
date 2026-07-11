@@ -24,8 +24,10 @@ class ReplyRequest(BaseModel):
     content: str
 
 class SettingsRequest(BaseModel):
-    whatsapp_auto_reply: bool
-    email_auto_reply: bool
+    whatsapp_auto_reply: bool = True
+    email_auto_reply: bool = True
+    # review_first = AI drafts only (human approves) | auto_send = send after delay if policy allows
+    reply_mode: str = "review_first"
 
 
 class EmailWebhookRequest(BaseModel):
@@ -98,25 +100,56 @@ async def manual_reply(
     
     return {"status": "success", "message": msg}
 
+def _default_support_settings() -> dict:
+    return {
+        "whatsapp_auto_reply": True,
+        "email_auto_reply": True,
+        "reply_mode": "review_first",  # safer default: draft for human review
+    }
+
+
 @router.get("/settings")
 def get_support_settings(
     db: Session = Depends(deps.get_db),
-    tenant_id: str = Depends(deps.get_current_tenant_id)
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.TICKETS, Action.READ)),
 ) -> Any:
     cred = db.query(APICredential).filter(
         APICredential.tenant_id == tenant_id,
         APICredential.provider == "support"
     ).first()
-    if not cred:
-        return {"whatsapp_auto_reply": True, "email_auto_reply": True}
-    return cred.settings or {"whatsapp_auto_reply": True, "email_auto_reply": True}
+    base = _default_support_settings()
+    if cred and cred.settings:
+        base.update(cred.settings)
+    # Reflect enterprise policy if present
+    try:
+        from app.services.policy_engine import PolicyEngine
+        pol = PolicyEngine(db, tenant_id).get_or_create_policy()
+        if pol.default_mode == "auto_with_rules":
+            base["reply_mode"] = "auto_send"
+        elif pol.default_mode == "draft_only":
+            base["reply_mode"] = "review_first"
+    except Exception:
+        pass
+    return base
+
 
 @router.post("/settings")
 def save_support_settings(
     payload: SettingsRequest,
     db: Session = Depends(deps.get_db),
-    tenant_id: str = Depends(deps.get_current_tenant_id)
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.TICKETS, Action.UPDATE)),
 ) -> Any:
+    mode = (payload.reply_mode or "review_first").lower()
+    if mode not in ("review_first", "auto_send"):
+        raise HTTPException(400, "reply_mode must be review_first or auto_send")
+
+    settings_dict = {
+        "whatsapp_auto_reply": payload.whatsapp_auto_reply,
+        "email_auto_reply": payload.email_auto_reply,
+        "reply_mode": mode,
+    }
     cred = db.query(APICredential).filter(
         APICredential.tenant_id == tenant_id,
         APICredential.provider == "support"
@@ -126,12 +159,25 @@ def save_support_settings(
             tenant_id=tenant_id,
             provider="support",
             encrypted_key="support_settings",
-            settings=payload.dict()
+            settings=settings_dict,
         )
         db.add(cred)
     else:
-        cred.settings = payload.dict()
+        merged = dict(cred.settings or {})
+        merged.update(settings_dict)
+        cred.settings = merged
+
+    # Sync HITL policy engine so Support auto-replies respect this choice
+    try:
+        from app.services.policy_engine import PolicyEngine
+        PolicyEngine(db, tenant_id).update_policy({
+            "default_mode": "auto_with_rules" if mode == "auto_send" else "draft_only",
+        })
+    except Exception:
+        pass
+
     db.commit()
+    db.refresh(cred)
     return {"status": "success", "settings": cred.settings}
 
 
