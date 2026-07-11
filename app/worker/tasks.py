@@ -203,6 +203,16 @@ def generate_campaign_task(tenant_id: str, params: dict):
         # Build a compact brand context string from knowledge base
         brand_context = knowledge.strip() if knowledge.strip() else f"Brand/Topic: {topic}"
 
+        # Learning loop: inject real performance lessons into generation
+        learning_cache = {}
+        try:
+            from app.services.marketing.analytics import MarketingAnalyticsService
+            analytics = MarketingAnalyticsService(db, tenant_id)
+            learning_cache["_all"] = analytics.learning_prompt_block(None)
+        except Exception as e:
+            print(f"[campaign] learning block unavailable: {e}")
+            learning_cache["_all"] = ""
+
         for day in range(1, days + 1):
             for platform in platforms:
 
@@ -263,14 +273,26 @@ def generate_campaign_task(tenant_id: str, params: dict):
                         "Output must be copy-paste ready."
                     )
 
-                # Append brand context to system prompt so prefix remains cacheable
+                # Platform-specific learning (cached)
+                if platform not in learning_cache:
+                    try:
+                        from app.services.marketing.analytics import MarketingAnalyticsService
+                        learning_cache[platform] = MarketingAnalyticsService(
+                            db, tenant_id
+                        ).learning_prompt_block(platform)
+                    except Exception:
+                        learning_cache[platform] = learning_cache.get("_all", "")
+                learning_block = learning_cache.get(platform) or learning_cache.get("_all") or ""
+
+                # Append brand context + performance learning to system prompt
                 system_prompt = (
                     f"{system_prompt}\n\n"
                     "CRITICAL: You must incorporate any contact details, websites, brand rules, "
                     "or specific calls-to-action defined in the Brand/Campaign Context below "
                     "into the final post text (e.g., in the call-to-action or final paragraph) "
                     "wherever appropriate.\n\n"
-                    f"Brand/Campaign Context:\n{brand_context}"
+                    f"Brand/Campaign Context:\n{brand_context}\n\n"
+                    f"{learning_block}"
                 )
 
                 # ── User prompt ────────────────────────────
@@ -279,6 +301,7 @@ def generate_campaign_task(tenant_id: str, params: dict):
                     f"Platform: {platform.upper()}\n\n"
                     f"Write the {platform} post for Day {day}. "
                     "Make it feel fresh, on-brand, and different from previous days. "
+                    "Apply LEARNED PERFORMANCE RULES when present. "
                     "Follow the output format in your instructions exactly."
                 )
 
@@ -320,9 +343,10 @@ def generate_campaign_task(tenant_id: str, params: dict):
                             f"Mood aligned with: {content[:120]}"
                         )
                         video_url = async_to_sync(llm.generate_video)(v_prompt, provider=video_provider)
-                        video_url = async_to_sync(ensure_public_url)(
-                            video_url, prefix="vid", default_mime="video/mp4"
-                        )
+                        if video_url and not str(video_url).startswith("error:"):
+                            video_url = async_to_sync(ensure_public_url)(
+                                video_url, prefix="vid", default_mime="video/mp4"
+                            )
                     elif generate_images:
                         i_prompt = (
                             f"High-resolution square (1:1) marketing photo for: {topic}. "
@@ -829,6 +853,42 @@ def run_sales_v3_task(tenant_id: str, provider: str = "gemini", model: str = Non
     except Exception as e:
         print(f"Error in run_sales_v3_task: {e}")
         raise e
+    finally:
+        db.close()
+
+
+@celery_app.task(name="sync_marketing_insights_task")
+def sync_marketing_insights_task(tenant_id: str = None, limit: int = 50):
+    """Pull FB/IG/LinkedIn insights and rebuild learning patterns."""
+    from app.models.base import Tenant
+    from app.services.marketing.analytics import MarketingAnalyticsService
+
+    db = SessionLocal()
+    try:
+        if tenant_id:
+            tenant_ids = [tenant_id]
+        else:
+            tenant_ids = [t.id for t in db.query(Tenant).filter(Tenant.is_active == True).all()]  # noqa: E712
+
+        summary = []
+        for tid in tenant_ids:
+            try:
+                result = async_to_sync(MarketingAnalyticsService(db, tid).sync_all)(limit=limit)
+                summary.append({"tenant_id": tid, **{k: result.get(k) for k in ("synced", "errors", "patterns_updated")}})
+            except Exception as e:
+                summary.append({"tenant_id": tid, "error": str(e)[:200]})
+        return {"status": "ok", "tenants": summary}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="rebuild_marketing_learning_task")
+def rebuild_marketing_learning_task(tenant_id: str):
+    from app.services.marketing.analytics import MarketingAnalyticsService
+    db = SessionLocal()
+    try:
+        n = MarketingAnalyticsService(db, tenant_id).rebuild_learning_patterns()
+        return {"status": "ok", "patterns_updated": n}
     finally:
         db.close()
 

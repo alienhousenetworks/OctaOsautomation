@@ -493,3 +493,129 @@ def bulk_schedule_posts(
 
     db.commit()
     return {"message": f"Successfully bulk scheduled {n} posts."}
+
+
+# ── Analytics + learning loop ────────────────────────────────────────────────
+
+@router.get("/analytics/dashboard")
+def marketing_analytics_dashboard(
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.READ)),
+) -> Any:
+    from app.services.marketing.analytics import MarketingAnalyticsService
+    return MarketingAnalyticsService(db, tenant_id).analytics_dashboard()
+
+
+@router.post("/analytics/sync")
+async def sync_marketing_analytics(
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.EXECUTE)),
+    limit: int = 50,
+    background: bool = True,
+) -> Any:
+    """Pull impressions/engagement from Meta & LinkedIn and update learning patterns."""
+    if background:
+        from app.worker.tasks import sync_marketing_insights_task
+        sync_marketing_insights_task.delay(tenant_id, limit)
+        return {"status": "queued", "message": "Analytics sync started in background"}
+    from app.services.marketing.analytics import MarketingAnalyticsService
+    return await MarketingAnalyticsService(db, tenant_id).sync_all(limit=limit)
+
+
+@router.post("/analytics/sync/{post_id}")
+async def sync_single_post_analytics(
+    post_id: str,
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.EXECUTE)),
+) -> Any:
+    post = (
+        db.query(models.ContentPost)
+        .filter(models.ContentPost.id == post_id, models.ContentPost.tenant_id == tenant_id)
+        .first()
+    )
+    if not post:
+        raise HTTPException(404, "Post not found")
+    from app.services.marketing.analytics import MarketingAnalyticsService
+    return await MarketingAnalyticsService(db, tenant_id).sync_post(post)
+
+
+@router.post("/analytics/rebuild-learning")
+def rebuild_marketing_learning(
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.EXECUTE)),
+) -> Any:
+    from app.services.marketing.analytics import MarketingAnalyticsService
+    n = MarketingAnalyticsService(db, tenant_id).rebuild_learning_patterns()
+    return {"status": "ok", "patterns_updated": n}
+
+
+@router.get("/analytics/learning-prompt")
+def get_learning_prompt(
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.READ)),
+    platform: Optional[str] = None,
+) -> Any:
+    from app.services.marketing.analytics import MarketingAnalyticsService
+    block = MarketingAnalyticsService(db, tenant_id).learning_prompt_block(platform)
+    return {"platform": platform, "learning_prompt": block}
+
+
+@router.get("/posts/{post_id}/insights")
+def get_post_insights(
+    post_id: str,
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.READ)),
+) -> Any:
+    post = (
+        db.query(models.ContentPost)
+        .filter(models.ContentPost.id == post_id, models.ContentPost.tenant_id == tenant_id)
+        .first()
+    )
+    if not post:
+        raise HTTPException(404, "Post not found")
+    from app.models.verticals import MarketingInsightSnapshot
+    snaps = (
+        db.query(MarketingInsightSnapshot)
+        .filter(
+            MarketingInsightSnapshot.post_id == post_id,
+            MarketingInsightSnapshot.tenant_id == tenant_id,
+        )
+        .order_by(MarketingInsightSnapshot.captured_at.desc())
+        .limit(30)
+        .all()
+    )
+    return {
+        "post_id": post.id,
+        "platform": post.platform,
+        "external_post_id": post.external_post_id,
+        "current": {
+            "impressions": post.impressions,
+            "reach": post.reach,
+            "engagement": post.engagement,
+            "likes": post.likes,
+            "comments": post.comments,
+            "shares": post.shares,
+            "clicks": post.clicks,
+            "ctr": post.ctr,
+            "engagement_rate": post.engagement_rate,
+            "performance_score": post.performance_score,
+            "learning_tags": post.learning_tags,
+            "synced_at": post.insights_synced_at,
+        },
+        "history": [
+            {
+                "impressions": s.impressions,
+                "engagement": s.engagement,
+                "ctr": s.ctr,
+                "engagement_rate": s.engagement_rate,
+                "captured_at": s.captured_at,
+            }
+            for s in snaps
+        ],
+    }

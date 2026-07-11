@@ -14,52 +14,86 @@ class MarketingAgent(BaseAgent):
             return await self._create_posts(params)
         elif action == "generate_campaign":
             return await self._generate_campaign(params)
+        elif action == "sync_analytics":
+            return await self._sync_analytics(params)
+        elif action == "learning_report":
+            return await self._learning_report(params)
         return {"status": "Unknown action"}
 
     async def _generate_campaign(self, params: dict):
         from app.worker.tasks import generate_campaign_task
-        # Trigger Celery task in background
-        generate_campaign_task.delay(self.tenant_id, params)
-        days = params.get("days", 30)
-        self.log_activity("Campaign Generation", f"Queued {days}-day campaign generation in the background.", status="pending")
-        return {"status": "queued", "message": f"{days}-day marketing campaign generation queued in the background."}
+        # Full campaign with media by default (not text-only)
+        payload = {
+            "topic": params.get("topic", "our company"),
+            "days": int(params.get("days", 7)),
+            "platforms": params.get("platforms", ["linkedin", "instagram", "facebook"]),
+            "text_provider": params.get("text_provider") or params.get("provider") or "gemini",
+            "text_model": params.get("text_model") or params.get("model"),
+            "image_provider": params.get("image_provider", "openai"),
+            "video_provider": params.get("video_provider", "pika"),
+            "generate_images": params.get("generate_images", True),
+            "generate_videos": params.get("generate_videos", False),
+            "generate_remotion": params.get("generate_remotion", False),
+        }
+        generate_campaign_task.delay(self.tenant_id, payload)
+        days = payload["days"]
+        self.log_activity(
+            "Campaign Generation",
+            f"Queued {days}-day multi-platform campaign with image generation + learning prompts.",
+            status="pending",
+        )
+        return {
+            "status": "queued",
+            "message": f"{days}-day marketing campaign queued (text + images; learning-aware).",
+            "params": payload,
+        }
 
     async def _create_posts(self, params: dict):
-        days = params.get("days", 3)
+        """Learning-aware short batch (uses campaign worker for media quality)."""
+        days = int(params.get("days", 3))
         topic = params.get("topic", "our business")
         platforms = params.get("platforms", ["linkedin"])
-        
-        self.log_activity("Generate Content", f"Generating {days} days of content about {topic}")
-        
-        count = 0
-        for day in range(1, days + 1):
-            for platform in platforms:
-                prompt = f"Create a short engaging post for {platform} about {topic}."
-                content = await self.llm.complete(prompt, model="claude-3-haiku-20240307")
-                
-                post = ContentPost(
-                    tenant_id=self.tenant_id,
-                    platform=platform,
-                    content=content,
-                    day=day,
-                    approval_status="pending"
-                )
-                self.db.add(post)
-                count += 1
-        self.db.commit()
+        # Prefer full campaign pipeline so image gen + learning apply
+        return await self._generate_campaign({
+            "topic": topic,
+            "days": days,
+            "platforms": platforms,
+            "generate_images": params.get("generate_images", True),
+            "generate_videos": params.get("generate_videos", False),
+            "text_provider": params.get("provider"),
+            "text_model": params.get("model"),
+            "image_provider": params.get("image_provider", "openai"),
+        })
 
-        metric = self.db.query(AgentMetric).filter(
-            AgentMetric.tenant_id == self.tenant_id,
-            AgentMetric.metric_name == "posts_generated",
-        ).first()
-        if not metric:
-            metric = AgentMetric(tenant_id=self.tenant_id, metric_name="posts_generated", value=0.0)
-            self.db.add(metric)
-        metric.value += count
-        self.db.commit()
+    async def _sync_analytics(self, params: dict):
+        from app.services.marketing.analytics import MarketingAnalyticsService
+        from asgiref.sync import async_to_sync
+        svc = MarketingAnalyticsService(self.db, self.tenant_id)
+        result = async_to_sync(svc.sync_all)(limit=int(params.get("limit", 50)))
+        self.log_activity(
+            "Analytics Sync",
+            f"Synced insights: {result.get('synced')} ok, {result.get('errors')} errors, "
+            f"{result.get('patterns_updated')} patterns.",
+            status="success",
+        )
+        return result
 
-        return {"status": "success", "generated_posts": count}
+    async def _learning_report(self, params: dict):
+        from app.services.marketing.analytics import MarketingAnalyticsService
+        dash = MarketingAnalyticsService(self.db, self.tenant_id).analytics_dashboard()
+        self.log_activity("Learning Report", "Generated marketing performance learning dashboard.", status="success")
+        return dash
 
     async def daily_routine(self):
-        self.log_activity("Daily Routine", "Auto-generating a daily awareness post.", status="success")
-        await self._create_posts({"days": 1, "topic": "daily inspiration / company awareness", "platforms": ["linkedin"]})
+        self.log_activity("Daily Routine", "Syncing post insights + learning patterns.", status="success")
+        try:
+            await self._sync_analytics({"limit": 40})
+        except Exception as e:
+            self.log_activity("Daily Analytics Failed", str(e)[:200], status="failed")
+        # Light content generation for pipeline
+        await self._create_posts({
+            "days": 1,
+            "topic": "daily brand awareness",
+            "platforms": ["linkedin"],
+            "generate_images": True,
+        })

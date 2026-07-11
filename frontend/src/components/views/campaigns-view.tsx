@@ -47,6 +47,9 @@ export default function CampaignsView({
   const [isGeneratorExpanded, setIsGeneratorExpanded] = useState<boolean>(true);
   const [campaignViewMode, setCampaignViewMode] = useState<'timeline' | 'kanban' | 'analytics'>('timeline');
   const [loading, setLoading] = useState(false);
+  const [analyticsDash, setAnalyticsDash] = useState<any>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsSyncing, setAnalyticsSyncing] = useState(false);
 
   const [editingPostId, setEditingPostId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState('');
@@ -62,6 +65,48 @@ export default function CampaignsView({
   const [uploadingFile, setUploadingFile] = useState(false);
   const [generatingMedia, setGeneratingMedia] = useState(false);
   const [suggestingPrompt, setSuggestingPrompt] = useState(false);
+
+  const fetchAnalyticsDashboard = async () => {
+    if (!token) return;
+    setAnalyticsLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/marketing/analytics/dashboard`);
+      if (res.ok) setAnalyticsDash(await res.json());
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  };
+
+  const syncAnalytics = async () => {
+    if (!token) return;
+    setAnalyticsSyncing(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/marketing/analytics/sync?background=false&limit=50`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        alert(`Synced: ${data.synced ?? 0} posts · Patterns updated: ${data.patterns_updated ?? 0}`);
+        await fetchAnalyticsDashboard();
+        await fetchData();
+      } else {
+        alert(data.detail || 'Analytics sync failed — ensure Meta/LinkedIn OAuth and published posts have external IDs.');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Analytics sync failed');
+    } finally {
+      setAnalyticsSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (token && campaignViewMode === 'analytics') {
+      fetchAnalyticsDashboard();
+    }
+  }, [token, campaignViewMode]);
 
   const [isCreatePostOpen, setIsCreatePostOpen] = useState(false);
   const [createPostPlatform, setCreatePostPlatform] = useState('linkedin');
@@ -1585,101 +1630,110 @@ export default function CampaignsView({
 
                   {campaignViewMode === 'analytics' && (
                     <div className="space-y-6 animate-in fade-in duration-300">
-                      {/* Metric widgets */}
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <h3 className="text-sm font-extrabold text-white">Live Performance &amp; Learning Loop</h3>
+                          <p className="text-[11px] text-gray-400 mt-0.5">
+                            Pulls FB / IG / LinkedIn insights · rebuilds what works · feeds next campaign generation
+                          </p>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button size="sm" variant="outline" disabled={analyticsLoading} onClick={() => fetchAnalyticsDashboard()}>
+                            {analyticsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Refresh'}
+                          </Button>
+                          <Button size="sm" disabled={analyticsSyncing} onClick={() => syncAnalytics()}>
+                            {analyticsSyncing ? (<><Loader2 className="h-3 w-3 animate-spin mr-1" /> Syncing…</>) : 'Sync platform insights'}
+                          </Button>
+                        </div>
+                      </div>
+
                       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                         <Card className="glass-panel border-gray-850 p-4 rounded-2xl bg-gray-950/20">
-                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Campaign Engagement</p>
-                          <h3 className="text-xl font-extrabold text-white mt-1">4.82%</h3>
-                          <div className="flex items-center gap-1.5 mt-2">
-                            <span className="text-[10px] text-emerald-450 font-bold">▲ +12.3%</span>
-                            <span className="text-[10px] text-gray-500">vs industry avg</span>
-                          </div>
+                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Avg Engagement Rate</p>
+                          <h3 className="text-xl font-extrabold text-white mt-1">
+                            {analyticsDash ? `${((analyticsDash.totals?.avg_engagement_rate || 0) * 100).toFixed(2)}%` : '—'}
+                          </h3>
+                          <p className="text-[10px] text-gray-500 mt-2">From {analyticsDash?.totals?.with_metrics ?? 0} posts with metrics</p>
                         </Card>
                         <Card className="glass-panel border-gray-850 p-4 rounded-2xl bg-gray-950/20">
-                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Projected Reach</p>
-                          <h3 className="text-xl font-extrabold text-white mt-1">125.4K</h3>
-                          <div className="flex items-center gap-1.5 mt-2">
-                            <span className="text-[10px] text-emerald-455 font-bold">▲ +18.4%</span>
-                            <span className="text-[10px] text-gray-500">organic timeline</span>
-                          </div>
+                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Total Impressions</p>
+                          <h3 className="text-xl font-extrabold text-white mt-1">
+                            {analyticsDash ? Math.round(analyticsDash.totals?.impressions || 0).toLocaleString() : '—'}
+                          </h3>
+                          <p className="text-[10px] text-gray-500 mt-2">Published: {analyticsDash?.totals?.published ?? 0}</p>
                         </Card>
-                        <Card className="glass-panel border-gray-850 p-4 rounded-2xl bg-gray-955/20">
-                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">AI Content Savings</p>
-                          <h3 className="text-xl font-extrabold text-white mt-1">$2,450</h3>
-                          <div className="flex items-center gap-1.5 mt-2">
-                            <span className="text-[10px] text-gray-400">Estimated value of copy/media</span>
-                          </div>
+                        <Card className="glass-panel border-gray-850 p-4 rounded-2xl bg-gray-950/20">
+                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Total Engagement</p>
+                          <h3 className="text-xl font-extrabold text-white mt-1">
+                            {analyticsDash ? Math.round(analyticsDash.totals?.engagement || 0).toLocaleString() : '—'}
+                          </h3>
+                          <p className="text-[10px] text-gray-500 mt-2">Clicks: {Math.round(analyticsDash?.totals?.clicks || 0).toLocaleString()}</p>
                         </Card>
-                        <Card className="glass-panel border-gray-850 p-4 rounded-2xl bg-gray-955/20">
-                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Brand Sentiment</p>
-                          <h3 className="text-xl font-extrabold text-white mt-1">94.1%</h3>
-                          <div className="flex items-center gap-1.5 mt-2">
-                            <span className="text-[10px] text-emerald-450 font-bold">▲ +2.8%</span>
-                            <span className="text-[10px] text-gray-500">positive score</span>
-                          </div>
+                        <Card className="glass-panel border-gray-850 p-4 rounded-2xl bg-gray-950/20">
+                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Avg CTR</p>
+                          <h3 className="text-xl font-extrabold text-white mt-1">
+                            {analyticsDash ? `${((analyticsDash.totals?.avg_ctr || 0) * 100).toFixed(2)}%` : '—'}
+                          </h3>
+                          <p className="text-[10px] text-gray-500 mt-2">Clicks ÷ impressions</p>
                         </Card>
                       </div>
 
-                      {/* Charts and details */}
                       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                        {/* Reach comparison */}
-                        <div className="lg:col-span-8 bg-gray-950/20 border border-gray-850 p-5 rounded-3xl space-y-4">
-                          <h4 className="text-xs font-bold text-white uppercase tracking-wider">Engagement &amp; Reach by Channel</h4>
-                          <div className="space-y-3.5">
-                            <div>
-                              <div className="flex justify-between text-xs mb-1">
-                                <span className="text-gray-300">LinkedIn (Professional Content)</span>
-                                <span className="text-gray-400 font-semibold">54K impressions (5.2% ER)</span>
+                        <div className="lg:col-span-7 bg-gray-950/20 border border-gray-850 p-5 rounded-3xl space-y-3">
+                          <h4 className="text-xs font-bold text-white uppercase tracking-wider">Top posts by performance score</h4>
+                          {(!analyticsDash?.top_posts || analyticsDash.top_posts.length === 0) && (
+                            <p className="text-xs text-gray-500 py-6 text-center">
+                              No metrics yet. Publish posts, then click <b>Sync platform insights</b>.
+                            </p>
+                          )}
+                          {(analyticsDash?.top_posts || []).map((p: any) => (
+                            <div key={p.id} className="border border-gray-800 rounded-xl p-3 space-y-1">
+                              <div className="flex justify-between gap-2 text-[10px] uppercase font-bold text-gray-400">
+                                <span>{p.platform}</span>
+                                <span className="text-emerald-400">Score {p.performance_score ?? 0}</span>
                               </div>
-                              <div className="h-2 w-full bg-gray-900 rounded-full overflow-hidden">
-                                <div className="h-full bg-blue-500 rounded-full" style={{ width: '65%' }} />
+                              <p className="text-xs text-gray-200 line-clamp-2">{p.content}</p>
+                              <div className="flex flex-wrap gap-3 text-[10px] text-gray-500">
+                                <span>Impr {Math.round(p.impressions || 0)}</span>
+                                <span>Eng {Math.round(p.engagement || 0)}</span>
+                                <span>ER {((p.engagement_rate || 0) * 100).toFixed(2)}%</span>
+                                <span>CTR {((p.ctr || 0) * 100).toFixed(2)}%</span>
                               </div>
+                              {p.learning_tags?.length > 0 && (
+                                <div className="flex flex-wrap gap-1 pt-1">
+                                  {p.learning_tags.map((t: string) => (
+                                    <span key={t} className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-300 border border-violet-500/20">{t}</span>
+                                  ))}
+                                </div>
+                              )}
                             </div>
-                            <div>
-                              <div className="flex justify-between text-xs mb-1">
-                                <span className="text-gray-300">Instagram (Visual Assets &amp; Loops)</span>
-                                <span className="text-gray-400 font-semibold">48K impressions (4.7% ER)</span>
-                              </div>
-                              <div className="h-2 w-full bg-gray-900 rounded-full overflow-hidden">
-                                <div className="h-full bg-pink-500 rounded-full" style={{ width: '58%' }} />
-                              </div>
-                            </div>
-                            <div>
-                              <div className="flex justify-between text-xs mb-1">
-                                <span className="text-gray-300">Facebook (Narrative &amp; Community)</span>
-                                <span className="text-gray-400 font-semibold">23.4K impressions (3.8% ER)</span>
-                              </div>
-                              <div className="h-2 w-full bg-gray-900 rounded-full overflow-hidden">
-                                <div className="h-full bg-indigo-500 rounded-full" style={{ width: '28%' }} />
-                              </div>
-                            </div>
-                          </div>
+                          ))}
                         </div>
 
-                        {/* Cost breakdown */}
-                        <div className="lg:col-span-4 bg-gray-955/10 border border-gray-850 p-5 rounded-3xl flex flex-col justify-between">
-                          <h4 className="text-xs font-bold text-white uppercase tracking-wider mb-3">Copywriter Resource Distribution</h4>
-                          <div className="flex justify-center items-center py-4">
-                            <svg className="w-32 h-32 transform -rotate-90">
-                              <circle cx="64" cy="64" r="50" fill="transparent" stroke="#1f2937" strokeWidth="12" />
-                              <circle cx="64" cy="64" r="50" fill="transparent" stroke="#8b5cf6" strokeWidth="12" strokeDasharray="314" strokeDashoffset="120" />
-                              <circle cx="64" cy="64" r="50" fill="transparent" stroke="#10b981" strokeWidth="12" strokeDasharray="314" strokeDashoffset="250" />
-                            </svg>
-                          </div>
-                          <div className="grid grid-cols-2 gap-2 text-[10px] text-gray-400">
-                            <div className="flex items-center gap-1.5">
-                              <span className="h-2.5 w-2.5 rounded bg-violet-500 shrink-0" />
-                              <span>AI Generated (82%)</span>
+                        <div className="lg:col-span-5 bg-gray-950/20 border border-gray-850 p-5 rounded-3xl space-y-3">
+                          <h4 className="text-xs font-bold text-white uppercase tracking-wider">Learning patterns (auto)</h4>
+                          <p className="text-[10px] text-gray-500">Boosted patterns are injected into the next campaign generation prompts.</p>
+                          {(!analyticsDash?.learning_patterns || analyticsDash.learning_patterns.length === 0) && (
+                            <p className="text-xs text-gray-500 py-4">Sync insights after publishing to build patterns.</p>
+                          )}
+                          {(analyticsDash?.learning_patterns || []).slice(0, 12).map((pat: any, i: number) => (
+                            <div key={`${pat.pattern_key}-${i}`} className="flex justify-between gap-2 text-xs border-b border-gray-900 pb-2">
+                              <div>
+                                <span className={pat.banned ? 'text-rose-400' : pat.weight > 0 ? 'text-emerald-400' : 'text-gray-300'}>
+                                  {pat.banned ? 'AVOID' : pat.weight > 0 ? 'DO MORE' : 'neutral'} · {pat.pattern_key}
+                                </span>
+                                <div className="text-[10px] text-gray-500">
+                                  n={pat.sample_count} · ER {((pat.avg_engagement_rate || 0) * 100).toFixed(2)}% · w={Number(pat.weight || 0).toFixed(2)}
+                                </div>
+                              </div>
+                              <span className="text-[10px] text-gray-500 uppercase">{pat.platform || 'all'}</span>
                             </div>
-                            <div className="flex items-center gap-1.5">
-                              <span className="h-2.5 w-2.5 rounded bg-emerald-500 shrink-0" />
-                              <span>Manual Content (18%)</span>
-                            </div>
-                          </div>
+                          ))}
                         </div>
                       </div>
                     </div>
                   )}
+
                 </div>
               )}
               </div>

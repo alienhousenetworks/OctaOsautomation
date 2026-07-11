@@ -64,6 +64,21 @@ class ContentPost(ContentPostBase):
     status: str
     approval_status: str
     created_at: datetime
+    published_at: Optional[datetime] = None
+    external_post_id: Optional[str] = None
+    external_url: Optional[str] = None
+    impressions: Optional[float] = 0
+    reach: Optional[float] = 0
+    engagement: Optional[float] = 0
+    likes: Optional[float] = 0
+    comments: Optional[float] = 0
+    shares: Optional[float] = 0
+    clicks: Optional[float] = 0
+    ctr: Optional[float] = 0
+    engagement_rate: Optional[float] = 0
+    performance_score: Optional[float] = 0
+    learning_tags: Optional[List[str]] = None
+    insights_synced_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

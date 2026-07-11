@@ -42,6 +42,16 @@ def apply_publish_result(db: Session, post: ContentPost, result, now: datetime) 
         post.approval_status = "published"
         post.published_at = now
         post.status = "published"
+        if getattr(result, "external_id", None):
+            post.external_post_id = result.external_id
+        # Seed learning tags at publish time
+        try:
+            from app.services.marketing.analytics import MarketingAnalyticsService
+            post.learning_tags = MarketingAnalyticsService.extract_content_tags(
+                post.content or "", post
+            )
+        except Exception:
+            pass
     else:
         log = ActivityLog(
             tenant_id=post.tenant_id,

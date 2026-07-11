@@ -58,7 +58,63 @@ class ContentPost(Base):
     approval_status = Column(String, default="pending") # pending, approved, rejected, published
     scheduled_at = Column(DateTime(timezone=True))
     published_at = Column(DateTime(timezone=True))
+    # Platform publish + analytics
+    external_post_id = Column(String, nullable=True, index=True)  # FB/IG/LinkedIn id after publish
+    external_url = Column(String, nullable=True)
+    impressions = Column(Float, default=0.0)
+    reach = Column(Float, default=0.0)
+    engagement = Column(Float, default=0.0)  # likes+comments+shares+saves aggregate
+    likes = Column(Float, default=0.0)
+    comments = Column(Float, default=0.0)
+    shares = Column(Float, default=0.0)
+    clicks = Column(Float, default=0.0)
+    ctr = Column(Float, default=0.0)  # clicks / impressions
+    engagement_rate = Column(Float, default=0.0)  # engagement / impressions
+    performance_score = Column(Float, default=0.0)  # 0-100 learned quality signal
+    insights_raw = Column(JSON, default=dict)
+    insights_synced_at = Column(DateTime(timezone=True), nullable=True)
+    learning_tags = Column(JSON, default=list)  # e.g. ["question_hook", "short_cta"]
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class MarketingInsightSnapshot(Base):
+    """Time-series snapshots of post performance for learning curves."""
+    __tablename__ = "marketing_insight_snapshots"
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    post_id = Column(String, ForeignKey("content_posts.id"), nullable=False, index=True)
+    platform = Column(String, nullable=True)
+    impressions = Column(Float, default=0.0)
+    reach = Column(Float, default=0.0)
+    engagement = Column(Float, default=0.0)
+    likes = Column(Float, default=0.0)
+    comments = Column(Float, default=0.0)
+    shares = Column(Float, default=0.0)
+    clicks = Column(Float, default=0.0)
+    ctr = Column(Float, default=0.0)
+    engagement_rate = Column(Float, default=0.0)
+    raw = Column(JSON, default=dict)
+    captured_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class MarketingLearningPattern(Base):
+    """What works / fails for this tenant — used to improve generation prompts."""
+    __tablename__ = "marketing_learning_patterns"
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    platform = Column(String, nullable=True, index=True)  # linkedin, facebook, instagram, or null=all
+    pattern_type = Column(String, nullable=False)  # hook_style, cta, length, emoji, media_type, topic
+    pattern_key = Column(String, nullable=False)  # e.g. "question_open", "short_cta", "with_image"
+    sample_count = Column(Integer, default=0)
+    avg_engagement_rate = Column(Float, default=0.0)
+    avg_ctr = Column(Float, default=0.0)
+    avg_performance_score = Column(Float, default=0.0)
+    weight = Column(Float, default=0.0)  # positive = boost, negative = avoid
+    examples = Column(JSON, default=list)  # short content samples
+    banned = Column(Boolean, default=False)
+    last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 
 # --- LEGAL (Phase 4) ---
 

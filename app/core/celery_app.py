@@ -53,6 +53,10 @@ celery_app.conf.beat_schedule = {
         "task": "poll_gmail_sales_inbox",
         "schedule": crontab(minute="*/3"),
     },
+    "sync-marketing-insights": {
+        "task": "sync_marketing_insights_task",
+        "schedule": crontab(minute="20", hour="*/6"),  # every 6 hours
+    },
 }
 
 if os.getenv("TESTING"):
