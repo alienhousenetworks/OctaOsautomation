@@ -70,3 +70,55 @@ class NegativePatternMemory(Base):
     pattern_signature = Column(String, nullable=False) # textual or regex signature
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class GlobalStrategyRegistry(Base):
+    """
+    Global Federated Strategy Registry. Stores anonymized cross-tenant strategy weights.
+    """
+    __tablename__ = "global_strategy_registry"
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    
+    agent_name = Column(String, nullable=False, index=True)
+    task_type = Column(String, nullable=False, index=True)
+    strategy_name = Column(String, nullable=False, index=True)
+    
+    global_weighted_reward = Column(Float, default=0.0)
+    total_evaluations = Column(Integer, default=0)
+    global_success_rate = Column(Float, default=0.0)
+    
+    last_synced = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class GlobalFailurePattern(Base):
+    """
+    Global Failure Immune System. Stores anonymized failure pattern signatures.
+    """
+    __tablename__ = "global_failure_patterns"
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    
+    agent_name = Column(String, nullable=False, index=True)
+    task_type = Column(String, nullable=False)
+    failure_category = Column(String, nullable=False)
+    anonymized_pattern_signature = Column(String, nullable=False)
+    immunity_score = Column(Float, default=1.0)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class GlobalSkillPackage(Base):
+    """
+    Federated Skill Store. Holds auto-discovered workflow skill packages.
+    """
+    __tablename__ = "global_skill_packages"
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    
+    skill_name = Column(String, nullable=False, unique=True, index=True)
+    category = Column(String, nullable=False)
+    description = Column(String, nullable=False)
+    triggers_json = Column(JSON, default=[])
+    skill_spec_md = Column(String, nullable=False)
+    
+    downloads_count = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+

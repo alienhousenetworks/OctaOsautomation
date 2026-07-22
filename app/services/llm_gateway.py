@@ -53,6 +53,9 @@ class LLMGateway:
         elif provider == "grok":
             import os
             return os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or ""
+        elif provider in ["kimi", "moonshot"]:
+            import os
+            return os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY") or ""
         return ""
     async def complete(self, prompt: str, model: str = None, provider: str = "anthropic", system_prompt: str = None, **kwargs) -> str:
         from app.services.ai_gateway import ai_gateway

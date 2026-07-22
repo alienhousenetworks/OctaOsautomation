@@ -185,9 +185,24 @@ class LearningLoop:
 
         self.db.commit()
 
+        # Publish anonymized outcome telemetry to Global Federated Registry
+        try:
+            from app.services.federated_learning_service import FederatedLearningService
+            fed_service = FederatedLearningService(self.db)
+            fed_service.publish_local_strategy(
+                agent_name=decision.agent_name,
+                task_type=decision.task_type,
+                strategy_name=decision.strategy_used,
+                reward_score=perf.weighted_reward_score,
+                success=is_success
+            )
+        except Exception as fe:
+            import logging
+            logging.warning(f"Federated learning strategy publish skipped: {fe}")
+
     def extract_negative_pattern(self, agent_name: str, task_type: str, failure_category: str, pattern: str):
         """
-        Stores failure intelligence to avoid repeating mistakes.
+        Stores failure intelligence to avoid repeating mistakes locally and globally.
         """
         neg = NegativePatternMemory(
             tenant_id=self.tenant_id,
@@ -198,3 +213,18 @@ class LearningLoop:
         )
         self.db.add(neg)
         self.db.commit()
+
+        # Publish to Global Failure Immune System
+        try:
+            from app.services.federated_learning_service import FederatedLearningService
+            fed_service = FederatedLearningService(self.db)
+            fed_service.publish_failure_signature(
+                agent_name=agent_name,
+                task_type=task_type,
+                failure_category=failure_category,
+                raw_signature=pattern
+            )
+        except Exception as fe:
+            import logging
+            logging.warning(f"Federated failure signature publish skipped: {fe}")
+
