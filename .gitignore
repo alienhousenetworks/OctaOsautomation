@@ -34,3 +34,8 @@ uploads/
 *.njsproj
 *.sln
 *.sw?
+
+# Build outputs
+build/
+dist/
+

@@ -5,6 +5,8 @@ from app.api.v1.endpoints import (
     enterprise, manager, federated_learning,
 )
 
+from app.api.v1.orchestrator import router as orchestrator_router
+
 api_router = APIRouter()
 api_router.include_router(tenants.router, prefix="/tenants", tags=["tenants"])
 api_router.include_router(leads.router, prefix="/leads", tags=["leads"])
@@ -27,6 +29,8 @@ api_router.include_router(videos.router, prefix="/videos", tags=["videos"])
 api_router.include_router(enterprise.router, prefix="/enterprise", tags=["enterprise"])
 api_router.include_router(manager.router, prefix="/manager", tags=["manager"])
 api_router.include_router(federated_learning.router, prefix="/learning", tags=["federated-learning"])
+api_router.include_router(orchestrator_router, prefix="/octa", tags=["octa-orchestrator"])
+
 
 
 
