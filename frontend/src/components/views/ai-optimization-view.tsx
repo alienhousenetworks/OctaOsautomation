@@ -252,6 +252,8 @@ export default function AIOptimizationView({
                               {Object.entries(providers).map(([provider, count]: [string, any]) => {
                                 const pct = (count / totalDeptCalls) * 100;
                                 const colors: any = {
+                                  openrouter: "bg-sky-500",
+                                  together: "bg-pink-500",
                                   openai: "bg-emerald-500",
                                   anthropic: "bg-violet-600",
                                   gemini: "bg-blue-500",
@@ -284,9 +286,13 @@ export default function AIOptimizationView({
                               return (
                                 <span key={provider} className="flex items-center gap-1">
                                   <span className={`h-1.5 w-1.5 rounded-full ${
+                                    provider === 'openrouter' ? 'bg-sky-500' :
+                                    provider === 'together' ? 'bg-pink-500' :
                                     provider === 'openai' ? 'bg-emerald-500' :
                                     provider === 'anthropic' ? 'bg-violet-600' :
-                                    provider === 'gemini' ? 'bg-blue-500' : 'bg-gray-450'
+                                    provider === 'gemini' ? 'bg-blue-500' :
+                                    provider === 'groq' ? 'bg-orange-500' :
+                                    provider === 'grok' ? 'bg-purple-600' : 'bg-gray-450'
                                   }`} />
                                   <span className="capitalize text-[10px]">{provider}</span> ({pct}%)
                                 </span>

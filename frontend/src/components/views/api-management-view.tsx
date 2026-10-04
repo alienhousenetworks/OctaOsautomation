@@ -9,7 +9,7 @@ import {
 } from '@/components/ui/dialog';
 import {
   Key, Trash2, Plus, RefreshCw, CheckCircle2, XCircle,
-  Eye, EyeOff, AlertTriangle, Zap, ChevronRight,
+  Eye, EyeOff, AlertTriangle, Zap, ChevronRight, Sparkles, Server, ShieldCheck,
 } from 'lucide-react';
 
 interface ApiManagementViewProps {
@@ -24,11 +24,14 @@ interface ApiManagementViewProps {
 // ─── Provider catalogue ────────────────────────────────────────────────────────
 const PROVIDER_GROUPS = [
   {
-    group: ' AI Brains',
+    group: '🧠 AI Brains',
     color: 'violet',
     description: 'Core LLM providers powering every AI agent',
     required: true,
     providers: [
+      { id: 'openrouter', label: 'OpenRouter (Meta-Hub)', hint: 'sk-or-v1-...', url: 'https://openrouter.ai/keys', placeholder: 'sk-or-v1-...' },
+      { id: 'together', label: 'Together AI (Meta-Hub)', hint: '64-hex / key', url: 'https://api.together.ai/settings/api-keys', placeholder: 'together_api_key...' },
+      { id: 'groq', label: 'Groq (Ultra-Fast LPU)', hint: 'gsk_...', url: 'https://console.groq.com/keys', placeholder: 'gsk_...' },
       { id: 'anthropic', label: 'Claude (Anthropic)', hint: 'sk-ant-...', url: 'https://console.anthropic.com/', placeholder: 'sk-ant-api03-...' },
       { id: 'openai', label: 'OpenAI (GPT-4o)', hint: 'sk-proj-...', url: 'https://platform.openai.com/api-keys', placeholder: 'sk-proj-...' },
       { id: 'gemini', label: 'Google Gemini', hint: 'AIza...', url: 'https://aistudio.google.com/app/apikey', placeholder: 'AIzaSy...' },
@@ -74,6 +77,7 @@ const PROVIDER_GROUPS = [
       { id: 'hunter', label: 'Hunter.io', hint: 'API Key', url: 'https://hunter.io/api-keys', placeholder: 'abc123...' },
       { id: 'google_places', label: 'Google Places API', hint: 'GCP API Key', url: 'https://console.cloud.google.com/', placeholder: 'AIzaSy...' },
       { id: 'apify', label: 'Apify', hint: 'API Token', url: 'https://console.apify.com/account/integrations', placeholder: 'apify_api_...' },
+      { id: 'firecrawl', label: 'Firecrawl (Web Crawler)', hint: 'API Key', url: 'https://www.firecrawl.dev/app/api-keys', placeholder: 'fc-...' },
       { id: 'zoominfo', label: 'ZoomInfo', hint: 'API Key', url: 'https://www.zoominfo.com/', placeholder: 'API_KEY...' },
       { id: 'cognism', label: 'Cognism', hint: 'API Key', url: 'https://www.cognism.com/', placeholder: 'API_KEY...' },
       { id: 'people_data_labs', label: 'People Data Labs', hint: 'API Key', url: 'https://www.peopledatalabs.com/', placeholder: 'API_KEY...' },
@@ -105,6 +109,10 @@ export default function ApiManagementView({
   const [configured, setConfigured] = useState<string[]>(configuredProviders);
   const [mainProvider, setMainProvider] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [aiMode, setAiMode] = useState<'inbuilt' | 'byok'>('inbuilt');
+  const [inbuiltAvailable, setInbuiltAvailable] = useState<boolean>(true);
+  const [defaultProvider, setDefaultProvider] = useState<string>('openrouter');
+  const [modeLoading, setModeLoading] = useState(false);
 
   // Dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -128,13 +136,24 @@ export default function ApiManagementView({
   const refresh = async () => {
     setRefreshing(true);
     try {
-      const res = await fetchWithAuth(`${API_URL}/commands/keys`);
-      if (res.ok) {
-        const data = await res.json();
+      const [keysRes, modeRes] = await Promise.allSettled([
+        fetchWithAuth(`${API_URL}/commands/keys`),
+        fetchWithAuth(`${API_URL}/commands/ai-mode`),
+      ]);
+
+      if (keysRes.status === 'fulfilled' && keysRes.value.ok) {
+        const data = await keysRes.value.json();
         const providers = data.configured_providers || [];
         setConfigured(providers.map((p: any) => p.provider));
         const main = providers.find((p: any) => p.is_main);
         if (main) setMainProvider(main.provider);
+      }
+
+      if (modeRes.status === 'fulfilled' && modeRes.value.ok) {
+        const modeData = await modeRes.value.json();
+        if (modeData.mode) setAiMode(modeData.mode);
+        if (modeData.inbuilt_available !== undefined) setInbuiltAvailable(modeData.inbuilt_available);
+        if (modeData.default_provider) setDefaultProvider(modeData.default_provider);
       }
     } finally {
       setRefreshing(false);
@@ -144,6 +163,35 @@ export default function ApiManagementView({
   useEffect(() => {
     refresh();
   }, []);
+
+  const handleModeChange = async (newMode: 'inbuilt' | 'byok') => {
+    if (newMode === aiMode || modeLoading) return;
+    setModeLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/commands/ai-mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: newMode }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAiMode(data.mode);
+        showToast(
+          data.mode === 'inbuilt'
+            ? '✨ Switched to Inbuilt Platform AI mode (Server-managed failover).'
+            : '🔐 Switched to BYOK mode (Bring Your Own Key).'
+        );
+        fetchData();
+        refresh();
+      } else {
+        showToast('❌ Failed to update AI mode.', 'err');
+      }
+    } catch {
+      showToast('❌ Network error updating AI mode.', 'err');
+    } finally {
+      setModeLoading(false);
+    }
+  };
 
   const openAddDialog = (p: { id: string; label: string; placeholder: string }) => {
     setDialogProvider(p);
@@ -212,7 +260,7 @@ export default function ApiManagementView({
 
   const totalConfigured = configured.length;
   const totalProviders = PROVIDER_GROUPS.reduce((acc, g) => acc + g.providers.length, 0);
-  const hasPrimaryAI = configured.some(p => ['anthropic', 'openai', 'gemini', 'grok'].includes(p));
+  const hasPrimaryAI = (aiMode === 'inbuilt' && inbuiltAvailable) || configured.some(p => ['anthropic', 'openai', 'gemini', 'grok', 'openrouter', 'together', 'groq'].includes(p));
 
   return (
     <div className="max-w-6xl mx-auto space-y-8 pb-16 animate-in fade-in duration-300">
@@ -233,10 +281,10 @@ export default function ApiManagementView({
             <div className="p-2.5 rounded-2xl bg-gradient-to-br from-violet-600/30 to-indigo-600/20 border border-violet-500/20">
               <Key className="text-violet-400 h-8 w-8" />
             </div>
-            API Key Management
+            API & Model Operations
           </h1>
           <p className="text-gray-400 mt-2 text-sm">
-            Manage all your API credentials in one place — add, replace, or revoke keys for any integration.
+            Toggle between server-managed Inbuilt AI and BYOK (Bring Your Own Key), or configure custom integration tokens.
           </p>
         </div>
         <Button
@@ -249,12 +297,133 @@ export default function ApiManagementView({
         </Button>
       </div>
 
+      {/* AI Mode Selector Card */}
+      <div className="glass-panel border-violet-500/30 rounded-3xl p-6 relative overflow-hidden bg-gradient-to-br from-violet-950/30 via-gray-900/50 to-indigo-950/20 shadow-2xl">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-gray-800/80">
+          <div>
+            <div className="flex items-center gap-2.5">
+              <Sparkles className="text-violet-400 h-5 w-5" />
+              <h2 className="text-white font-extrabold text-lg">AI Execution Architecture</h2>
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-violet-500/15 text-violet-300 border border-violet-500/30 px-2.5 py-0.5 rounded-full">
+                Mode: {aiMode.toUpperCase()}
+              </span>
+            </div>
+            <p className="text-gray-400 text-xs mt-1">
+              Choose whether agents consume platform-level redundant AI hubs (OpenRouter/Together) or your own BYOK credentials.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 bg-gray-950/70 border border-gray-800 p-1 rounded-2xl">
+            <button
+              onClick={() => handleModeChange('inbuilt')}
+              disabled={modeLoading}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                aiMode === 'inbuilt'
+                  ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-lg shadow-violet-500/25'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Server size={13} />
+              Inbuilt Platform AI
+            </button>
+            <button
+              onClick={() => handleModeChange('byok')}
+              disabled={modeLoading}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                aiMode === 'byok'
+                  ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg shadow-indigo-500/25'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <ShieldCheck size={13} />
+              BYOK (Your Keys)
+            </button>
+          </div>
+        </div>
+
+        {/* Dual Mode Description Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
+          {/* Inbuilt Mode Card */}
+          <div
+            onClick={() => handleModeChange('inbuilt')}
+            className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+              aiMode === 'inbuilt'
+                ? 'bg-violet-950/40 border-violet-500/50 shadow-inner'
+                : 'bg-gray-950/40 border-gray-850 hover:border-gray-700'
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className={`p-2 rounded-xl ${aiMode === 'inbuilt' ? 'bg-violet-500/20 text-violet-300' : 'bg-gray-850 text-gray-400'}`}>
+                  <Server size={16} />
+                </div>
+                <div>
+                  <h3 className="text-white text-sm font-bold flex items-center gap-2">
+                    Inbuilt Platform AI
+                    {aiMode === 'inbuilt' && <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />}
+                  </h3>
+                  <span className="text-[10px] text-gray-400">Zero Setup • Server-Configured Multi-Vendor</span>
+                </div>
+              </div>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                inbuiltAvailable
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+              }`}>
+                {inbuiltAvailable ? 'Online' : 'Unconfigured'}
+              </span>
+            </div>
+            <p className="text-gray-400 text-xs mt-3 leading-relaxed">
+              Leverages server environment keys for <strong className="text-gray-200">OpenRouter</strong>, <strong className="text-gray-200">Together AI</strong>, and <strong className="text-gray-200">Groq</strong> with automatic multi-vendor failover safety. No personal keys required to run agents.
+            </p>
+            <div className="mt-3 flex items-center gap-2 text-[11px] text-violet-300/80 font-mono">
+              <Zap size={11} className="text-amber-400" />
+              Default Hub: <span className="text-white font-bold">{defaultProvider.toUpperCase()}</span>
+            </div>
+          </div>
+
+          {/* BYOK Mode Card */}
+          <div
+            onClick={() => handleModeChange('byok')}
+            className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+              aiMode === 'byok'
+                ? 'bg-indigo-950/40 border-indigo-500/50 shadow-inner'
+                : 'bg-gray-950/40 border-gray-850 hover:border-gray-700'
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className={`p-2 rounded-xl ${aiMode === 'byok' ? 'bg-indigo-500/20 text-indigo-300' : 'bg-gray-850 text-gray-400'}`}>
+                  <ShieldCheck size={16} />
+                </div>
+                <div>
+                  <h3 className="text-white text-sm font-bold flex items-center gap-2">
+                    BYOK (Bring Your Own Key)
+                    {aiMode === 'byok' && <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />}
+                  </h3>
+                  <span className="text-[10px] text-gray-400">Strict Isolation • Custom Quotas</span>
+                </div>
+              </div>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-gray-800 text-gray-400 border-gray-700">
+                {configured.length} Keys Configured
+              </span>
+            </div>
+            <p className="text-gray-400 text-xs mt-3 leading-relaxed">
+              Agents use your own encrypted workspace credentials. Complete isolation with direct billing from Anthropic, OpenAI, OpenRouter, or Together AI.
+            </p>
+            <div className="mt-3 flex items-center gap-2 text-[11px] text-indigo-300/80 font-mono">
+              <Key size={11} className="text-indigo-400" />
+              Keys Stored: <span className="text-white font-bold">{configured.length > 0 ? configured.join(', ') : 'None yet'}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="glass-panel border-transparent rounded-2xl p-5 relative overflow-hidden">
           <div className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-violet-500 to-transparent" />
           <div className="text-3xl font-black text-white">{totalConfigured}</div>
-          <div className="text-xs text-gray-400 mt-1 font-medium">of {totalProviders} providers configured</div>
+          <div className="text-xs text-gray-400 mt-1 font-medium">of {totalProviders} providers configured in BYOK</div>
           <div className="mt-3 w-full bg-gray-800 rounded-full h-1.5">
             <div
               className="bg-gradient-to-r from-violet-500 to-indigo-500 h-1.5 rounded-full transition-all duration-700"
@@ -267,12 +436,14 @@ export default function ApiManagementView({
           }`}>
           <div className={`flex items-center gap-2 text-sm font-bold ${hasPrimaryAI ? 'text-emerald-400' : 'text-rose-400 animate-pulse'}`}>
             {hasPrimaryAI ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-            {hasPrimaryAI ? 'AI Brain: Active' : 'AI Brain: Missing!'}
+            {hasPrimaryAI ? (aiMode === 'inbuilt' ? 'AI Brain: Ready (Inbuilt)' : 'AI Brain: Active (BYOK)') : 'AI Brain: Missing!'}
           </div>
           <p className="text-xs text-gray-400 mt-2 leading-relaxed">
             {hasPrimaryAI
-              ? 'At least one LLM provider (Claude / GPT-4o / Gemini) is configured — agents are operational.'
-              : 'No primary AI key found. Add Claude, OpenAI, or Gemini to activate your agents.'}
+              ? (aiMode === 'inbuilt'
+                ? `Platform AI is operational with server multi-vendor routing (${defaultProvider}). Agents are ready.`
+                : 'Custom LLM credentials verified — agents are operational.')
+              : 'No operational AI found. Configure a BYOK key below or ensure server environment keys are set.'}
           </p>
         </div>
 
@@ -406,7 +577,7 @@ export default function ApiManagementView({
                               <Plus size={11} />
                               {isConfigured ? 'Replace' : 'Add Key'}
                             </button>
-                            {isConfigured && ['anthropic', 'openai', 'gemini', 'grok'].includes(provider.id) && mainProvider !== provider.id && (
+                            {isConfigured && ['anthropic', 'openai', 'gemini', 'grok', 'openrouter', 'together', 'groq'].includes(provider.id) && mainProvider !== provider.id && (
                               <button
                                 onClick={() => handleSetMain(provider.id)}
                                 className="text-[11px] font-bold px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-amber-500/20 hover:text-amber-400 border border-gray-700/50 text-gray-400 transition-all"

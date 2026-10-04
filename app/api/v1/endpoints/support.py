@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any
 from pydantic import BaseModel
@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from app.api import deps
 from app.core.config import settings
 from app.core.rbac import Action, Resource, require_permission
-from app.models.base import User
-from app.models.verticals import Ticket, TicketMessage
+from app.models.base import User, Tenant
+from app.models.verticals import Ticket, TicketMessage, SupportAgentPresence
 from app.models.base import APICredential
 from app.services.webhook_security import (
     check_and_store_idempotency,
@@ -17,6 +17,8 @@ from app.services.webhook_security import (
     verify_meta_signature,
     verify_whatsapp_token,
 )
+from app.services.support_chat_service import SupportChatService
+from app.services.widget_script import get_widget_embed_js
 
 router = APIRouter()
 
@@ -26,14 +28,72 @@ class ReplyRequest(BaseModel):
 class SettingsRequest(BaseModel):
     whatsapp_auto_reply: bool = True
     email_auto_reply: bool = True
+    widget_auto_reply: bool = True
+    live_chat_enabled: bool = True
+    widget_title: Optional[str] = "Customer Support"
+    widget_welcome: Optional[str] = "Hi there! How can we assist you today?"
+    widget_color: Optional[str] = "#2563eb"
     # review_first = AI drafts only (human approves) | auto_send = send after delay if policy allows
     reply_mode: str = "review_first"
 
+class WidgetMessageRequest(BaseModel):
+    session_id: str
+    message: str = ""
+    sender_name: Optional[str] = None
+    sender_email: Optional[str] = None
+    sender_phone: Optional[str] = None
+    action: Optional[str] = None  # "chat", "request_handoff"
+
+class RaiseTicketRequest(BaseModel):
+    session_id: str
+    problem: str
+    name: str
+    email: str
+    mobile_no: str
+
+class AgentPresenceRequest(BaseModel):
+    is_online: bool
 
 class EmailWebhookRequest(BaseModel):
     sender: str
     subject: str
     content: str
+
+def _iso(dt) -> Optional[str]:
+    return dt.isoformat() if dt else None
+
+
+def _ticket_to_dict(t: Ticket) -> dict:
+    return {
+        "id": t.id,
+        "subject": t.subject,
+        "description": t.description,
+        "status": t.status,
+        "priority": t.priority,
+        "channel": t.channel,
+        "customer_contact": t.customer_contact,
+        "customer_name": t.customer_name,
+        "customer_email": t.customer_email,
+        "customer_phone": t.customer_phone,
+        "claimed_by": t.claimed_by,
+        "claimed_at": _iso(t.claimed_at),
+        "resolved_at": _iso(t.resolved_at),
+        "session_id": t.session_id,
+        "mode": t.mode or "ai",
+        "approval_status": t.approval_status,
+        "created_at": _iso(t.created_at),
+    }
+
+
+def _message_to_dict(m: TicketMessage) -> dict:
+    return {
+        "id": m.id,
+        "ticket_id": m.ticket_id,
+        "sender": m.sender,
+        "content": m.content,
+        "created_at": _iso(m.created_at),
+    }
+
 
 @router.get("/tickets")
 def get_tickets(
@@ -42,7 +102,7 @@ def get_tickets(
     _: User = Depends(require_permission(Resource.TICKETS, Action.READ)),
 ) -> Any:
     tickets = db.query(Ticket).filter(Ticket.tenant_id == tenant_id).order_by(Ticket.created_at.desc()).all()
-    return tickets
+    return [_ticket_to_dict(t) for t in tickets]
 
 @router.get("/tickets/{ticket_id}/messages")
 def get_ticket_messages(
@@ -55,14 +115,15 @@ def get_ticket_messages(
         raise HTTPException(status_code=404, detail="Ticket not found")
     
     messages = db.query(TicketMessage).filter(TicketMessage.ticket_id == ticket_id).order_by(TicketMessage.created_at.asc()).all()
-    return messages
+    return [_message_to_dict(m) for m in messages]
 
 @router.post("/tickets/{ticket_id}/reply")
 async def manual_reply(
     ticket_id: str,
     payload: ReplyRequest,
     db: Session = Depends(deps.get_db),
-    tenant_id: str = Depends(deps.get_current_tenant_id)
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    user: User = Depends(deps.get_current_user),
 ) -> Any:
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id, Ticket.tenant_id == tenant_id).first()
     if not ticket:
@@ -74,8 +135,25 @@ async def manual_reply(
         content=payload.content
     )
     db.add(msg)
+    if ticket.status in ("pending_human", "open"):
+        ticket.status = "human_handling"
+        ticket.mode = "human"
+    if not ticket.claimed_by:
+        ticket.claimed_by = user.id
     db.commit()
     db.refresh(msg)
+    
+    msg_dict = {
+        "id": msg.id,
+        "ticket_id": msg.ticket_id,
+        "sender": msg.sender,
+        "content": msg.content,
+        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+    }
+
+    # Widget and chat channels are delivered in real-time via REST polling / web widget
+    if ticket.channel in ("widget", "chat", None):
+        return {"status": "success", "message": msg_dict}
     
     from app.services.agents.support import SupportAgent
     agent = SupportAgent(db, tenant_id)
@@ -90,20 +168,25 @@ async def manual_reply(
                 break
         if provider:
             if provider == "smtp":
-                msg = "I need your SMTP outgoing mail credentials. Please reply with: 'My smtp credential is: smtp://username:password@smtp.mailtrap.io:2525'."
+                msg_text = "I need your SMTP outgoing mail credentials. Please reply with: 'My smtp credential is: smtp://username:password@smtp.mailtrap.io:2525'."
             else:
-                msg = f"I need your {provider} API key to complete this task. Please reply with 'My {provider} key is: [YOUR_KEY]'."
-            return {"status": "action_required", "message": msg}
+                msg_text = f"I need your {provider} API key to complete this task. Please reply with 'My {provider} key is: [YOUR_KEY]'."
+            return {"status": "action_required", "message": msg_text}
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     
-    return {"status": "success", "message": msg}
+    return {"status": "success", "message": msg_dict}
 
 def _default_support_settings() -> dict:
     return {
         "whatsapp_auto_reply": True,
         "email_auto_reply": True,
+        "widget_auto_reply": True,
+        "live_chat_enabled": True,
+        "widget_title": "Customer Support",
+        "widget_welcome": "Hi there! How can we assist you today?",
+        "widget_color": "#2563eb",
         "reply_mode": "review_first",  # safer default: draft for human review
     }
 
@@ -148,6 +231,11 @@ def save_support_settings(
     settings_dict = {
         "whatsapp_auto_reply": payload.whatsapp_auto_reply,
         "email_auto_reply": payload.email_auto_reply,
+        "widget_auto_reply": payload.widget_auto_reply,
+        "live_chat_enabled": payload.live_chat_enabled,
+        "widget_title": payload.widget_title,
+        "widget_welcome": payload.widget_welcome,
+        "widget_color": payload.widget_color,
         "reply_mode": mode,
     }
     cred = db.query(APICredential).filter(
@@ -179,6 +267,195 @@ def save_support_settings(
     db.commit()
     db.refresh(cred)
     return {"status": "success", "settings": cred.settings}
+
+
+# ── Human Handoff & Claim / Resolve Endpoints ──────────────────────────────
+
+@router.post("/tickets/{ticket_id}/claim")
+def claim_ticket(
+    ticket_id: str,
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    user: User = Depends(deps.get_current_user),
+    _: User = Depends(require_permission(Resource.TICKETS, Action.UPDATE)),
+) -> Any:
+    service = SupportChatService(db, tenant_id)
+    try:
+        return service.claim_ticket(ticket_id, user)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/tickets/{ticket_id}/resolve")
+def resolve_ticket(
+    ticket_id: str,
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    user: User = Depends(deps.get_current_user),
+    _: User = Depends(require_permission(Resource.TICKETS, Action.UPDATE)),
+) -> Any:
+    service = SupportChatService(db, tenant_id)
+    try:
+        return service.resolve_ticket(ticket_id, user)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/agent/presence")
+def update_agent_presence(
+    payload: AgentPresenceRequest,
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    user: User = Depends(deps.get_current_user),
+) -> Any:
+    service = SupportChatService(db, tenant_id)
+    user_name = user.name or user.email.split("@")[0]
+    return service.update_agent_presence(user.id, user_name, payload.is_online)
+
+
+@router.get("/agent/presence")
+def get_agent_presence(
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(deps.get_current_user),
+) -> Any:
+    service = SupportChatService(db, tenant_id)
+    return service.check_agent_availability()
+
+
+# ── Public Embeddable Support Widget Endpoints ─────────────────────────────
+
+@router.get("/widget/config/{tenant_id}")
+def get_widget_config(
+    tenant_id: str,
+    db: Session = Depends(deps.get_db),
+) -> Any:
+    ensure_tenant_active(db, tenant_id)
+    cred = db.query(APICredential).filter(
+        APICredential.tenant_id == tenant_id,
+        APICredential.provider == "support"
+    ).first()
+    settings_dict = _default_support_settings()
+    if cred and cred.settings:
+        settings_dict.update(cred.settings)
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    tenant_name = tenant.name if tenant else "Support"
+
+    service = SupportChatService(db, tenant_id)
+    avail = service.check_agent_availability()
+
+    custom_title = settings_dict.get("widget_title")
+    title = custom_title if (custom_title and custom_title != "Customer Support") else f"{tenant_name} Support"
+
+    return {
+        "tenant_id": tenant_id,
+        "tenant_name": tenant_name,
+        "title": title,
+        "welcome_message": settings_dict.get("widget_welcome") or "Hi there! How can we assist you today?",
+        "brand_color": settings_dict.get("widget_color") or "#2563eb",
+        "live_chat_available": avail.get("available", False),
+        "online_agents_count": avail.get("online_agents_count", 0),
+        "ai_enabled": True
+    }
+
+
+@router.post("/widget/message/{tenant_id}")
+async def widget_message(
+    tenant_id: str,
+    payload: WidgetMessageRequest,
+    db: Session = Depends(deps.get_db),
+) -> Any:
+    ensure_tenant_active(db, tenant_id)
+    service = SupportChatService(db, tenant_id)
+    return await service.handle_visitor_message(
+        session_id=payload.session_id,
+        message=payload.message,
+        sender_name=payload.sender_name,
+        sender_email=payload.sender_email,
+        sender_phone=payload.sender_phone,
+        action=payload.action
+    )
+
+
+@router.post("/widget/raise-ticket/{tenant_id}")
+def widget_raise_ticket(
+    tenant_id: str,
+    payload: RaiseTicketRequest,
+    db: Session = Depends(deps.get_db),
+) -> Any:
+    ensure_tenant_active(db, tenant_id)
+    service = SupportChatService(db, tenant_id)
+    return service.raise_ticket_from_widget(
+        session_id=payload.session_id,
+        problem=payload.problem,
+        name=payload.name,
+        email=payload.email,
+        mobile_no=payload.mobile_no
+    )
+
+
+@router.get("/widget/poll/{tenant_id}/{session_id}")
+def widget_poll(
+    tenant_id: str,
+    session_id: str,
+    db: Session = Depends(deps.get_db),
+) -> Any:
+    ensure_tenant_active(db, tenant_id)
+    ticket = db.query(Ticket).filter(
+        Ticket.tenant_id == tenant_id,
+        Ticket.session_id == session_id
+    ).order_by(Ticket.created_at.desc()).first()
+
+    if not ticket:
+        return {"ticket": None, "messages": [], "mode": "ai"}
+
+    messages = db.query(TicketMessage).filter(
+        TicketMessage.ticket_id == ticket.id
+    ).order_by(TicketMessage.created_at.asc()).all()
+
+    service = SupportChatService(db, tenant_id)
+    avail = service.check_agent_availability()
+
+    agent_name = None
+    if ticket.claimed_by:
+        agent_user = db.query(User).filter(User.id == ticket.claimed_by).first()
+        if agent_user:
+            agent_name = agent_user.name or agent_user.email.split("@")[0]
+
+    return {
+        "ticket": {
+            "id": ticket.id,
+            "status": ticket.status,
+            "mode": ticket.mode or "ai",
+            "claimed_by": ticket.claimed_by,
+            "agent_name": agent_name
+        },
+        "messages": [
+            {
+                "id": m.id,
+                "sender": m.sender,
+                "content": m.content,
+                "created_at": m.created_at.isoformat() if m.created_at else None
+            }
+            for m in messages
+        ],
+        "live_chat_available": avail.get("available", False)
+    }
+
+
+@router.get("/widget/embed.js")
+def widget_embed_js(request: Request) -> Any:
+    base_url = str(request.base_url).rstrip("/")
+    js_code = get_widget_embed_js(default_api_base=base_url)
+    return Response(
+        content=js_code,
+        media_type="application/javascript",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600"
+        }
+    )
 
 
 @router.get("/whatsapp/webhook/{tenant_id}")

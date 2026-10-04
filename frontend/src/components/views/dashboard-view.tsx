@@ -173,7 +173,7 @@ export default function DashboardView({
           { title: "Success Rate", val: `${metrics.automation_success_rate || 99.5}%`, desc: "Autopilot efficiency rate", icon: <BarChart3 className="h-4 w-4 text-pink-400" />, glow: "neon-glow-cyan" },
         ].map((m, idx) => (
           <Dialog key={idx}>
-            <DialogTrigger render={<div className="h-full" />}>
+            <DialogTrigger nativeButton={false} render={<div className="h-full" />}>
               <Card className={`hud-card h-full ${m.glow} cursor-pointer group transition-transform duration-300 hover:-translate-y-1`}>
                 <CardHeader className="flex flex-row items-center justify-between pb-2 z-10 relative">
                   <CardTitle className="text-[10px] font-bold text-gray-400 uppercase tracking-widest font-mono group-hover:text-white transition-colors">{m.title}</CardTitle>

@@ -169,287 +169,92 @@ def generate_campaign_task(tenant_id: str, params: dict):
     from app.services.llm_gateway import LLMGateway
     from app.models.verticals import ContentPost
     from app.models.agents import ActivityLog
-    from app.services.agents.marketing import MarketingAgent
-    from datetime import datetime
+    from app.services.marketing.campaign_os.orchestrator import CampaignOSOrchestrator
+    from asgiref.sync import async_to_sync
+    import logging
     
+    task_logger = logging.getLogger("generate_campaign_task")
     db = SessionLocal()
     try:
         topic = params.get("topic", "our company")
         days = int(params.get("days", 30))
         platforms = params.get("platforms", ["linkedin", "instagram", "facebook"])
-        text_provider = params.get("text_provider", "gemini")
-        text_model = params.get("text_model", None)
         image_provider = params.get("image_provider", "openai")
         video_provider = params.get("video_provider", "pika")
-        generate_images = params.get("generate_images", True)
-        from app.core.config import settings as app_settings
-        # Force-off in-app video until product-ready
-        generate_videos = bool(params.get("generate_videos", False)) and bool(
-            getattr(app_settings, "ENABLE_IN_APP_VIDEO", False)
-        )
-        generate_remotion = bool(params.get("generate_remotion", False)) and bool(
-            getattr(app_settings, "ENABLE_IN_APP_VIDEO", False)
-        )
-        
+        generate_images = bool(params.get("generate_images", True))
+        generate_videos = bool(params.get("generate_videos", False))
+
         # Log start activity
         log = ActivityLog(
             tenant_id=tenant_id,
-            agent_name="Marketing AI",
-            action="Campaign Start",
-            description=f"Starting generation of a {days}-day marketing campaign on platforms: {', '.join(platforms)}.",
-            status="success"
+            agent_name="Campaign OS",
+            action="Campaign DAG Started",
+            description=f"Initiating 3-stage Campaign OS DAG for a {days}-day multi-platform campaign on: {topic}.",
+            status="pending"
         )
         db.add(log)
         db.commit()
 
+        # Execute the 3-stage Campaign OS Orchestrator
+        orchestrator = CampaignOSOrchestrator(db, tenant_id)
+        result = async_to_sync(orchestrator.execute_campaign_dag)(params)
+
+        # Dispatch Media Rendering with Circuit Breakers (if requested and prompt exists)
         llm = LLMGateway(db, tenant_id)
-        agent = MarketingAgent(db, tenant_id)
-        knowledge = agent.get_knowledge_context("Marketing")
-
-        # Build a compact brand context string from knowledge base
-        brand_context = knowledge.strip() if knowledge.strip() else f"Brand/Topic: {topic}"
-
-        # Learning loop: inject real performance lessons into generation
-        learning_cache = {}
-        try:
-            from app.services.marketing.analytics import MarketingAnalyticsService
-            analytics = MarketingAnalyticsService(db, tenant_id)
-            learning_cache["_all"] = analytics.learning_prompt_block(None)
-        except Exception as e:
-            print(f"[campaign] learning block unavailable: {e}")
-            learning_cache["_all"] = ""
-
-        for day in range(1, days + 1):
-            for platform in platforms:
-
-                # ── Platform-specific strict system prompts ──────────────────
-                if platform == "instagram":
-                    system_prompt = (
-                        "You are a professional Instagram content creator. "
-                        "Your ONLY job is to write the exact text that goes into an Instagram post — nothing else. "
-                        "OUTPUT FORMAT (follow exactly, no deviations):\n"
-                        "Line 1: A punchy hook sentence or emoji-led opener (max 15 words).\n"
-                        "Lines 2-6: 3-5 short, punchy body sentences. Use emojis naturally inline. No bullet lists.\n"
-                        "Line 7: A clear call-to-action (e.g. 'Drop a 🔥 if you agree!' or 'Tap the link in bio.').\n"
-                        "Line 8: (blank line)\n"
-                        "Line 9+: 15-25 relevant hashtags on a single line, space-separated.\n\n"
-                        "STRICT RULES — violating any of these will break the product:\n"
-                        "- NO markdown (no **, no ##, no ---, no *italics*)\n"
-                        "- NO headings or section labels\n"
-                        "- NO phrases like 'Visual Suggestion', 'Image Suggestion', 'Caption:', 'Hook:', 'Content:', 'CTA:'\n"
-                        "- NO copywriter notes, briefs, or meta-commentary\n"
-                        "- NO day/campaign references (e.g. 'Day 1 of 3')\n"
-                        "- Output ONLY the raw post text a user would copy-paste directly into Instagram."
-                    )
-                elif platform == "facebook":
-                    system_prompt = (
-                        "You are a professional Facebook content creator. "
-                        "Your ONLY job is to write the exact text that goes into a Facebook post — nothing else. "
-                        "OUTPUT FORMAT (follow exactly):\n"
-                        "Paragraph 1: 2-3 engaging sentences that hook the reader.\n"
-                        "Paragraph 2: 2-3 sentences expanding on the value or story.\n"
-                        "Paragraph 3: A clear call-to-action.\n"
-                        "Final line: 5-10 relevant hashtags.\n\n"
-                        "STRICT RULES:\n"
-                        "- NO markdown (no **, no ##, no ---)\n"
-                        "- NO section labels like 'Caption:', 'Hook:', 'CTA:', 'Visual Suggestion:'\n"
-                        "- NO copywriter notes or meta-commentary\n"
-                        "- Output ONLY the raw post text ready to paste into Facebook."
-                    )
-                elif platform == "linkedin":
-                    system_prompt = (
-                        "You are a professional LinkedIn content creator. "
-                        "Your ONLY job is to write the exact text that goes into a LinkedIn post — nothing else. "
-                        "OUTPUT FORMAT (follow exactly):\n"
-                        "Line 1: A bold, thought-provoking opening statement (no emoji, max 12 words).\n"
-                        "Lines 2-8: 4-6 short punchy lines (1-2 sentences each). Can include a numbered insight list.\n"
-                        "Final paragraph: A professional call-to-action or question to drive comments.\n"
-                        "Last line: 3-5 professional hashtags.\n\n"
-                        "STRICT RULES:\n"
-                        "- NO markdown headers (##, ###)\n"
-                        "- NO section labels like 'Hook:', 'Content:', 'CTA:'\n"
-                        "- Minimal emoji usage (LinkedIn professional tone)\n"
-                        "- NO copywriter notes or meta-commentary\n"
-                        "- Output ONLY the raw post text ready to paste into LinkedIn."
-                    )
-                else:
-                    system_prompt = (
-                        f"You are a social media expert for {platform}. "
-                        "Write ONLY the exact post text — no markdown, no section labels, no meta-commentary. "
-                        "Output must be copy-paste ready."
-                    )
-
-                # Platform-specific learning (cached)
-                if platform not in learning_cache:
-                    try:
-                        from app.services.marketing.analytics import MarketingAnalyticsService
-                        learning_cache[platform] = MarketingAnalyticsService(
-                            db, tenant_id
-                        ).learning_prompt_block(platform)
-                    except Exception:
-                        learning_cache[platform] = learning_cache.get("_all", "")
-                learning_block = learning_cache.get(platform) or learning_cache.get("_all") or ""
-
-                # Append brand context + performance learning to system prompt
-                system_prompt = (
-                    f"{system_prompt}\n\n"
-                    "CRITICAL: You must incorporate any contact details, websites, brand rules, "
-                    "or specific calls-to-action defined in the Brand/Campaign Context below "
-                    "into the final post text (e.g., in the call-to-action or final paragraph) "
-                    "wherever appropriate.\n\n"
-                    f"Brand/Campaign Context:\n{brand_context}\n\n"
-                    f"{learning_block}"
-                )
-
-                # ── User prompt ────────────────────────────
-                prompt = (
-                    f"Campaign Day: {day} of {days}\n"
-                    f"Platform: {platform.upper()}\n\n"
-                    f"Write the {platform} post for Day {day}. "
-                    "Make it feel fresh, on-brand, and different from previous days. "
-                    "Apply LEARNED PERFORMANCE RULES when present. "
-                    "Follow the output format in your instructions exactly."
-                )
-
-                content = async_to_sync(llm.complete)(
-                    prompt=prompt,
-                    model=text_model,
-                    provider=text_provider,
-                    system_prompt=system_prompt
-                )
-
-                # Strip any residual markdown or section headers the LLM may have added
-                import re as _re
-                # Remove lines that look like markdown headers or copywriter labels
-                cleaned_lines = []
-                skip_patterns = _re.compile(
-                    r'^(#{1,4}\s|Visual Suggestion|Image Suggestion|Caption:|Hook:|Content:|CTA:|'
-                    r'Call-to-Action:|Option [A-Z]:|---|\*\*\*)',
-                    _re.IGNORECASE
-                )
-                for line in content.split("\n"):
-                    if skip_patterns.match(line.strip()):
-                        continue
-                    # Remove inline **bold** and *italic* markers
-                    line = _re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', line)
-                    cleaned_lines.append(line)
-                content = "\n".join(cleaned_lines).strip()
-                # Collapse more than 2 consecutive blank lines
-                content = _re.sub(r'\n{3,}', '\n\n', content)
-
-                image_url = None
-                video_url = None
-
-                # ── Media generation with rich, descriptive prompts ───────────
-                if platform == "instagram" or platform == "facebook":
-                    if generate_videos and (day % 3 == 0):
-                        v_prompt = (
-                            f"Cinematic short-form marketing video for: {topic}. "
-                            f"Style: modern, vibrant, energetic. Platform: {platform}. "
-                            f"Mood aligned with: {content[:120]}"
-                        )
-                        video_url = async_to_sync(llm.generate_video)(v_prompt, provider=video_provider)
-                        if video_url and not str(video_url).startswith("error:"):
-                            video_url = async_to_sync(ensure_public_url)(
-                                video_url, prefix="vid", default_mime="video/mp4"
-                            )
-                    elif generate_images:
-                        i_prompt = (
-                            f"High-resolution square (1:1) marketing photo for: {topic}. "
-                            f"Style: professional, visually stunning, social-media-ready. "
-                            f"No text overlays. Mood: {content[:120]}"
-                        )
-                        raw = async_to_sync(llm.generate_image)(i_prompt, provider=image_provider)
-                        if raw and raw.startswith("error:"):
-                            image_url = raw  # store error sentinel for UI display
-                        else:
-                            image_url = async_to_sync(ensure_public_url)(raw, prefix="img") if raw else None
-
-                    if generate_remotion and (day % 3 == 0):
-                        from app.services.agents.video import VideoAgent
-                        from app.models.video import VideoProject
-                        import httpx
-                        import os
-                        v_agent = VideoAgent(db, tenant_id)
-                        v_project = VideoProject(
-                            tenant_id=tenant_id,
-                            title=f"Campaign Remotion Day {day} {platform}",
-                            prompt=f"Create a short motion graphics video for: {topic}. Script context: {content[:200]}",
-                            duration_seconds=15
-                        )
-                        db.add(v_project)
-                        db.commit()
-                        db.refresh(v_project)
-                        res = async_to_sync(v_agent.plan_video)(v_project.id)
-                        if res.get("status") == "success":
-                            blueprint = res.get("blueprint")
-                            with httpx.Client(timeout=300.0) as client:
-                                try:
-                                    resp = client.post("http://localhost:8002/render", json=blueprint)
-                                    if resp.status_code == 200:
-                                        data = resp.json()
-                                        local_file = data.get("file")
-                                        if local_file and os.path.exists(local_file):
-                                            with open(local_file, "rb") as f:
-                                                f_content = f.read()
-                                            from app.services.media.storage import _write_bytes
-                                            public_url = _write_bytes(f_content, "video/mp4", prefix="remotion")
-                                            video_url = public_url
-                                except Exception as e:
-                                    print(f"Renderer error: {str(e)}")
-                elif platform == "linkedin":
-                    if generate_images:
-                        i_prompt = (
-                            f"Professional corporate image for LinkedIn about: {topic}. "
-                            "Clean, modern office or brand aesthetic. No text overlays. "
-                            f"Conveys: {content[:120]}"
-                        )
-                        raw = async_to_sync(llm.generate_image)(i_prompt, provider=image_provider)
-                        if raw and raw.startswith("error:"):
-                            image_url = raw
-                        else:
-                            image_url = async_to_sync(ensure_public_url)(raw, prefix="img") if raw else None
-                
-                post = ContentPost(
-                    tenant_id=tenant_id,
-                    platform=platform,
-                    content=content,
-                    image_url=image_url,
-                    video_url=video_url,
-                    day=day,
-                    status="draft",
-                    approval_status="pending",
-                    created_at=datetime.utcnow()
-                )
-                db.add(post)
-                db.commit()
-                
-            progress_log = ActivityLog(
-                tenant_id=tenant_id,
-                agent_name="Marketing AI",
-                action="Campaign Progress",
-                description=f"Generated day {day}/{days} posts.",
-                status="success"
+        created_posts = (
+            db.query(ContentPost)
+            .filter(
+                ContentPost.tenant_id == tenant_id,
+                ContentPost.image_url == None,  # noqa: E711
             )
-            db.add(progress_log)
-            db.commit()
-            
+            .order_by(ContentPost.created_at.desc())
+            .limit(days * len(platforms))
+            .all()
+        )
+
+        for post in created_posts:
+            # Image Rendering Dispatch
+            if generate_images and post.image_prompt and not post.image_url:
+                try:
+                    raw = async_to_sync(llm.generate_image)(post.image_prompt, provider=image_provider)
+                    if raw and not raw.startswith("error:"):
+                        post.image_url = async_to_sync(ensure_public_url)(raw, prefix="img")
+                    elif raw and raw.startswith("error:"):
+                        post.image_url = raw  # Keep error sentinel for UI warning
+                except Exception as img_err:
+                    task_logger.warning(f"Image generation failed gracefully for post {post.id}: {img_err}")
+                    # Circuit breaker: graceful degradation to text-only
+
+            # Video Rendering Dispatch
+            if generate_videos and post.video_prompt and not post.video_url:
+                try:
+                    v_raw = async_to_sync(llm.generate_video)(post.video_prompt, provider=video_provider)
+                    if v_raw and not str(v_raw).startswith("error:"):
+                        post.video_url = async_to_sync(ensure_public_url)(v_raw, prefix="vid", default_mime="video/mp4")
+                except Exception as vid_err:
+                    task_logger.warning(f"Video generation failed gracefully for post {post.id}: {vid_err}")
+
+        db.commit()
+
         final_log = ActivityLog(
             tenant_id=tenant_id,
-            agent_name="Marketing AI",
-            action="Campaign Complete",
-            description=f"Successfully generated full {days}-day campaign. Ready for review.",
+            agent_name="Campaign OS",
+            action="Campaign DAG Completed",
+            description=f"Generated {result.get('total_posts_generated', 0)} posts. Auto-approved: {result.get('approved_count', 0)}, Review needed: {result.get('needs_review_count', 0)}.",
             status="success"
         )
         db.add(final_log)
         db.commit()
-        
+
+        return result
+
     except Exception as e:
+        task_logger.error(f"Error in Campaign OS DAG task: {e}", exc_info=True)
         error_log = ActivityLog(
             tenant_id=tenant_id,
-            agent_name="Marketing AI",
-            action="Campaign Failed",
-            description=f"Error generating campaign: {str(e)}",
+            agent_name="Campaign OS",
+            action="Campaign DAG Failed",
+            description=f"Error in Campaign OS DAG: {str(e)[:300]}",
             status="failed"
         )
         db.add(error_log)
@@ -457,6 +262,7 @@ def generate_campaign_task(tenant_id: str, params: dict):
         raise e
     finally:
         db.close()
+
 
 @celery_app.task(name="publish_post_by_id")
 def publish_post_by_id(post_id: str):
@@ -527,11 +333,16 @@ def auto_reply_task(tenant_id: str, ticket_id: str, trigger_msg_id: str, channel
         db.close()
 
 @celery_app.task(name="run_boardroom_meeting_task")
-def run_boardroom_meeting_task(tenant_id: str, meeting_id: str):
+def run_boardroom_meeting_task(
+    tenant_id: str,
+    meeting_id: str,
+    provider: Optional[str] = None,
+    model: Optional[str] = None
+):
     from app.services.agents.boardroom import BoardroomService
     db = SessionLocal()
     try:
-        service = BoardroomService(db, tenant_id)
+        service = BoardroomService(db, tenant_id, provider=provider, model=model)
         async_to_sync(service.run_meeting)(meeting_id)
     except Exception as e:
         print(f"Error in run_boardroom_meeting_task: {e}")
@@ -1038,5 +849,39 @@ def render_video_task(tenant_id: str, project_id: str):
         except Exception as inner_e:
             logging.error(f"Failed to update error status in DB: {inner_e}")
             db.rollback()
+    finally:
+        db.close()
+
+
+@celery_app.task(name="recrawl_due_knowledge_sources_task")
+def recrawl_due_knowledge_sources_task():
+    """Periodically check and re-crawl scheduled knowledge sources."""
+    from datetime import datetime, timezone, timedelta
+    from app.models.agents import KnowledgeSource
+    from app.services.web_ingestion.website_sync import WebsiteSyncService
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        sources = db.query(KnowledgeSource).filter(
+            KnowledgeSource.schedule.in_(["daily", "weekly"]),
+            KnowledgeSource.last_status != "running",
+        ).all()
+
+        for s in sources:
+            should_crawl = False
+            if not s.last_crawled_at:
+                should_crawl = True
+            elif s.schedule == "daily" and (now - s.last_crawled_at) > timedelta(days=1):
+                should_crawl = True
+            elif s.schedule == "weekly" and (now - s.last_crawled_at) > timedelta(days=7):
+                should_crawl = True
+
+            if should_crawl:
+                try:
+                    sync_service = WebsiteSyncService(db, s.tenant_id)
+                    async_to_sync(sync_service.sync_knowledge_source)(s.id)
+                except Exception as e:
+                    logging.error(f"Periodic crawl failed for source {s.id}: {e}")
     finally:
         db.close()

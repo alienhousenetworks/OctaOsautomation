@@ -4,6 +4,7 @@ from sqlalchemy import (
     Column, String, Boolean, DateTime, ForeignKey, JSON, Float, Integer, Text, UniqueConstraint
 )
 from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
 from app.models.base import Base
 
 
@@ -270,6 +271,12 @@ class KnowledgeChunk(Base):
     title = Column(String, nullable=True)
     content = Column(Text, nullable=False)
     embedding_hint = Column(String, nullable=True)  # keyword fingerprint for simple retrieval
+    embedding = Column(Vector(1536), nullable=True)  # pgvector dense embedding (1536 dims)
+    page_start = Column(Integer, nullable=True)
+    page_end = Column(Integer, nullable=True)
+    section_title = Column(String, nullable=True)
+    source_url = Column(String, nullable=True)
+    content_hash = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

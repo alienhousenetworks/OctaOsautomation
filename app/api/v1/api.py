@@ -3,6 +3,7 @@ from app.api.v1.endpoints import (
     tenants, leads, marketing, llm, commands, dashboard, auth, support, hr,
     coordination, google, meta_oauth, linkedin_oauth, ceo, system_admin, audit, usage, videos,
     enterprise, manager, federated_learning,
+    deal_rooms, sales_manager,
 )
 
 from app.api.v1.orchestrator import router as orchestrator_router
@@ -30,6 +31,8 @@ api_router.include_router(enterprise.router, prefix="/enterprise", tags=["enterp
 api_router.include_router(manager.router, prefix="/manager", tags=["manager"])
 api_router.include_router(federated_learning.router, prefix="/learning", tags=["federated-learning"])
 api_router.include_router(orchestrator_router, prefix="/octa", tags=["octa-orchestrator"])
+api_router.include_router(deal_rooms.router, prefix="/deal-rooms", tags=["deal-rooms"])
+api_router.include_router(sales_manager.router, prefix="/sales-manager", tags=["sales-manager"])
 
 
 

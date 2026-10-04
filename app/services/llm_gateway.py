@@ -36,27 +36,8 @@ class LLMGateway:
         self.db.commit()
 
     def _get_api_key(self, provider: str) -> str:
-        from app.services.credentials import get_decrypted_credential
-
-        key, _ = get_decrypted_credential(self.db, self.tenant_id, provider)
-        if key:
-            return key
-        
-        # Fall back to environment variables
-        if provider == "anthropic":
-            return settings.SHARED_CLAUDE_KEY or settings.ANTHROPIC_API_KEY
-        elif provider == "openai":
-            return settings.OPENAI_API_KEY
-        elif provider == "gemini":
-            import os
-            return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-        elif provider == "grok":
-            import os
-            return os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or ""
-        elif provider in ["kimi", "moonshot"]:
-            import os
-            return os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY") or ""
-        return ""
+        from app.services.ai_gateway import ai_gateway
+        return ai_gateway._get_api_key(self.db, self.tenant_id, provider)
     async def complete(self, prompt: str, model: str = None, provider: str = "anthropic", system_prompt: str = None, **kwargs) -> str:
         from app.services.ai_gateway import ai_gateway
         
@@ -76,6 +57,7 @@ class LLMGateway:
 
         # 1b. Automatically fetch and inject relevant knowledge base documents to system prompt
         from app.models.agents import KnowledgeDocument
+        from app.services.rag.hybrid_engine import HybridRAGEngine
         dept_map = {
             "marketing": "Marketing",
             "sales": "Sales",
@@ -87,23 +69,38 @@ class LLMGateway:
         dept_name = dept_map.get(inferred_task_type)
         
         try:
-            query = self.db.query(KnowledgeDocument).filter(
-                KnowledgeDocument.tenant_id == self.tenant_id
+            # 1. Pinned global directives (brand voice, contact info, website rules)
+            pinned_query = self.db.query(KnowledgeDocument).filter(
+                KnowledgeDocument.tenant_id == self.tenant_id,
+                KnowledgeDocument.is_active == True,
             )
             if dept_name:
-                query = query.filter(KnowledgeDocument.department.in_([dept_name, "General"]))
+                pinned_query = pinned_query.filter(KnowledgeDocument.department.in_([dept_name, "General"]))
             
-            docs = query.all()
-            if docs:
-                knowledge_str = (
+            pinned_docs = pinned_query.filter(
+                KnowledgeDocument.doc_type.in_(["Prompt Directives", "Brand Guidelines"])
+            ).all()
+
+            # 2. Retrieve top relevant chunks for this specific query
+            rag_engine = HybridRAGEngine(self.db, self.tenant_id)
+            rag_hits = rag_engine.retrieve(prompt, top_k=4, department=dept_name)
+
+            if pinned_docs or rag_hits:
+                knowledge_parts = [
                     "Company Guidelines & Knowledge Base:\n"
                     "CRITICAL INSTRUCTION: You must strictly adhere to the company guidelines, brand rules, "
-                    "contact details (e.g. email, phone), and websites listed below. Incorporate them "
-                    "into your generated output (social posts, emails, replies, etc.) whenever relevant.\n\n"
-                )
-                for doc in docs:
-                    knowledge_str += f"\n--- {doc.doc_type} ({doc.department}) ---\n{doc.content}\n"
-                
+                    "contact details, and websites listed below. Incorporate them into your response when relevant.\n"
+                ]
+
+                for p_doc in pinned_docs:
+                    knowledge_parts.append(f"\n[Pinned Directive - {p_doc.doc_type} ({p_doc.department})]:\n{p_doc.content}\n")
+
+                if rag_hits:
+                    knowledge_parts.append("\nRelevant Context Extracts:")
+                    for h in rag_hits:
+                        knowledge_parts.append(f"\n{h['citation']}:\n{h['content']}")
+
+                knowledge_str = "\n".join(knowledge_parts)
                 if system_prompt:
                     if "Company Guidelines & Knowledge Base:" not in system_prompt:
                         system_prompt = f"{system_prompt}\n\n{knowledge_str}"

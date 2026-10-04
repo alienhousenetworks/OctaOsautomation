@@ -147,16 +147,16 @@ export default function InstructionsView({
                   <p className="text-gray-400 text-xs mt-1">Powers the core thinking, writing, image creation, and video generation for your AI employees.</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${configuredProviders.includes('anthropic') || configuredProviders.includes('openai') || configuredProviders.includes('gemini')
+                  <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${configuredProviders.includes('anthropic') || configuredProviders.includes('openai') || configuredProviders.includes('gemini') || configuredProviders.includes('openrouter') || configuredProviders.includes('together') || configuredProviders.includes('groq') || configuredProviders.includes('grok')
                       ? 'bg-emerald-500/10 text-emerald-455 border-emerald-500/20'
                       : 'bg-rose-500/10 text-rose-455 border-rose-500/20 animate-pulse'
                     }`}>
-                    <span className={`h-1.5 w-1.5 rounded-full ${configuredProviders.includes('anthropic') || configuredProviders.includes('openai') || configuredProviders.includes('gemini') ? 'bg-emerald-450' : 'bg-rose-450'
+                    <span className={`h-1.5 w-1.5 rounded-full ${configuredProviders.includes('anthropic') || configuredProviders.includes('openai') || configuredProviders.includes('gemini') || configuredProviders.includes('openrouter') || configuredProviders.includes('together') || configuredProviders.includes('groq') || configuredProviders.includes('grok') ? 'bg-emerald-450' : 'bg-rose-450'
                       }`} />
-                    {configuredProviders.includes('anthropic') || configuredProviders.includes('openai') || configuredProviders.includes('gemini') ? 'Active' : 'Missing Primary Key'}
+                    {configuredProviders.includes('anthropic') || configuredProviders.includes('openai') || configuredProviders.includes('gemini') || configuredProviders.includes('openrouter') || configuredProviders.includes('together') || configuredProviders.includes('groq') || configuredProviders.includes('grok') ? 'Active' : 'Missing Primary Key'}
                   </span>
                   <Button
-                    onClick={() => { setKeyProvider('anthropic'); setIsKeyDialogOpen(true); }}
+                    onClick={() => { setKeyProvider('openrouter'); setIsKeyDialogOpen(true); }}
                     className="bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold h-8 rounded-xl px-4"
                   >
                     Configure
@@ -165,10 +165,35 @@ export default function InstructionsView({
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8 text-gray-300 text-xs">
+                {/* OpenRouter */}
+                <div className="space-y-2">
+                  <p className="font-bold text-white flex items-center gap-1.5 text-sm pb-1 border-b border-gray-800">
+                    <span className="h-2 w-2 rounded-full bg-sky-400" /> OpenRouter (Meta-Hub — All Models)
+                  </p>
+                  <ol className="list-decimal pl-4 space-y-1.5 text-gray-400">
+                    <li>Go to <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer" className="text-violet-400 hover:text-violet-300 transition-colors hover:underline font-medium">openrouter.ai/keys</a> and sign in.</li>
+                    <li>Click <strong>Create Key</strong> and give it a label (e.g. "OctaOS").</li>
+                    <li>Copy your API key starting with <code>sk-or-v1-</code>.</li>
+                    <li>Provides access to Claude 3.5, GPT-4o, Gemini 2.5, DeepSeek, and Llama from a single balance.</li>
+                  </ol>
+                </div>
+
+                {/* Together AI */}
+                <div className="space-y-2">
+                  <p className="font-bold text-white flex items-center gap-1.5 text-sm pb-1 border-b border-gray-800">
+                    <span className="h-2 w-2 rounded-full bg-pink-400" /> Together AI (Open Source & Fast Inference)
+                  </p>
+                  <ol className="list-decimal pl-4 space-y-1.5 text-gray-400">
+                    <li>Go to <a href="https://api.together.ai/settings/api-keys" target="_blank" rel="noreferrer" className="text-violet-400 hover:text-violet-300 transition-colors hover:underline font-medium">api.together.ai</a> and create an account.</li>
+                    <li>Navigate to <strong>Settings &gt; API Keys</strong>.</li>
+                    <li>Copy your API key and save it in OctaOS to run Llama 3.3 70B, DeepSeek V3, and Qwen at ultra-low latency.</li>
+                  </ol>
+                </div>
+
                 {/* Claude */}
                 <div className="space-y-2">
                   <p className="font-bold text-white flex items-center gap-1.5 text-sm pb-1 border-b border-gray-800">
-                    <span className="h-2 w-2 rounded-full bg-violet-400" /> Claude (Anthropic API) - Recommended
+                    <span className="h-2 w-2 rounded-full bg-violet-400" /> Claude (Anthropic API)
                   </p>
                   <ol className="list-decimal pl-4 space-y-1.5 text-gray-400">
                     <li>Go to <a href="https://console.anthropic.com/" target="_blank" rel="noreferrer" className="text-violet-400 hover:text-violet-300 transition-colors hover:underline font-medium">console.anthropic.com</a> and sign in.</li>
@@ -221,7 +246,7 @@ export default function InstructionsView({
                 </div>
 
                 {/* Pika AI */}
-                <div className="space-y-2 md:col-span-2 lg:col-span-1">
+                <div className="space-y-2">
                   <p className="font-bold text-white flex items-center gap-1.5 text-sm pb-1 border-b border-gray-800">
                     <span className="h-2 w-2 rounded-full bg-amber-400" /> Pika AI (Video Generation)
                   </p>

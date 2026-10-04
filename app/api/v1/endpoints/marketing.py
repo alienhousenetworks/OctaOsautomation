@@ -74,6 +74,35 @@ def trigger_campaign(
     return {"status": "queued", "message": "Campaign generation has been queued in the background."}
 
 
+@router.post("/campaign/preview-brief")
+async def preview_campaign_brief(
+    *,
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id),
+    _: User = Depends(require_permission(Resource.CAMPAIGNS, Action.CREATE)),
+    topic: str = "Enterprise Automation",
+    days: int = 3,
+) -> Any:
+    """Preview strategy brief and narrative arc before launching background campaign generation."""
+    from app.services.knowledge_os.intent_projector import CompanyContextProjectionEngine, IntentType
+    from app.services.marketing.campaign_os.roles import CampaignRolesEngine
+
+    projector = CompanyContextProjectionEngine(db, tenant_id)
+    roles = CampaignRolesEngine(db, tenant_id)
+
+    projection = await projector.get_projection(intent=IntentType.CAMPAIGN_MARKETING)
+    brand_brief = await roles.execute_brand_strategist(topic=topic, campaign_projection=projection)
+    visual_tokens = await roles.execute_visual_director(brand_brief=brand_brief, campaign_projection=projection)
+    narrative_arc = await roles.execute_narrative_architect(days=days, brand_brief=brand_brief)
+
+    return {
+        "status": "success",
+        "brand_brief": brand_brief.model_dump(),
+        "visual_tokens": visual_tokens.model_dump(),
+        "narrative_arc": narrative_arc.model_dump(),
+    }
+
+
 @router.put("/posts/{post_id}", response_model=schemas.ContentPost)
 def update_post(
     *,

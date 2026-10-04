@@ -10,20 +10,33 @@ class AICostOptimizer:
         """
         Retrieves cost and properties for a given provider/model.
         """
-        registry_key = f"{provider.lower()}/{model.lower()}"
+        p_lower = (provider or "").lower().strip()
+        if p_lower in ("togetherapi", "together_ai"):
+            p_lower = "together"
+        elif p_lower in ("xai",):
+            p_lower = "grok"
+
+        m_lower = (model or "").lower().strip()
+        registry_key = f"{p_lower}/{m_lower}"
         
+        # Exact match
+        if registry_key in MODEL_REGISTRY:
+            return MODEL_REGISTRY[registry_key]
+
         # Fallback keyword match if exact model name differs (e.g. version suffixes)
         for key, spec in MODEL_REGISTRY.items():
-            if spec["provider"] == provider.lower() and spec["model"] in model.lower():
+            if spec["provider"] == p_lower and (spec["model"] in m_lower or m_lower in spec["model"]):
                 return spec
                 
         # Default fallback
-        return MODEL_REGISTRY.get(registry_key, {
-            "input_cost_1m": 2.0,
-            "output_cost_1m": 8.0,
+        return {
+            "provider": p_lower,
+            "model": model,
+            "input_cost_1m": 1.0,
+            "output_cost_1m": 3.0,
             "supports_batch": False,
             "supports_caching": False
-        })
+        }
 
     @classmethod
     def estimateCost(cls, prompt: str, model: str, system_prompt: Optional[str] = None, provider: str = "openai") -> float:

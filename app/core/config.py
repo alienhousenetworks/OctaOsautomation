@@ -41,9 +41,26 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
 
-    # LLM KEYS
+    # LLM KEYS & VENDORS
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
+    GOOGLE_API_KEY: Optional[str] = None
+    OPENROUTER_API_KEY: Optional[str] = None
+    TOGETHER_API_KEY: Optional[str] = None
+    TOGETHERAI_API_KEY: Optional[str] = None
+    GROQ_API_KEY: Optional[str] = None
+    GROK_API_KEY: Optional[str] = None
+    XAI_API_KEY: Optional[str] = None
+
+    # VENDOR ROUTING & MODEL SELECTION
+    DEFAULT_AI_PROVIDER: str = "openrouter"  # openrouter | together | groq | grok | anthropic | openai | gemini
+    DEFAULT_AI_MODEL: Optional[str] = None
+    DEFAULT_AI_MODE: str = "inbuilt"  # inbuilt | byok
+    OPENROUTER_MODELS: Optional[str] = None  # Comma-separated custom models from env
+    TOGETHER_MODELS: Optional[str] = None
+    GROQ_MODELS: Optional[str] = None
+    GROK_MODELS: Optional[str] = None
 
     # PILOT CONFIG
     SHARED_CLAUDE_KEY: Optional[str] = None

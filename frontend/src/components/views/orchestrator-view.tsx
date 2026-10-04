@@ -185,13 +185,13 @@ export default function OrchestratorView({
                     <div className="flex items-center gap-2 flex-wrap">
                       {/* Integration Status Pills */}
                       <div className="hidden md:flex items-center gap-1">
-                        {['anthropic', 'openai', 'gemini', 'meta', 'linkedin', 'smtp', 'apollo'].map(prov => (
+                        {['openrouter', 'together', 'anthropic', 'openai', 'gemini', 'groq', 'meta', 'linkedin', 'smtp', 'apollo'].map(prov => (
                           <span key={prov} className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md border transition-colors ${
                             configuredProviders.includes(prov)
                               ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                               : 'bg-gray-900/40 text-gray-600 border-gray-800'
                           }`}>
-                            {prov === 'anthropic' ? 'Claude' : prov === 'openai' ? 'GPT' : prov === 'gemini' ? 'Gemini' : prov === 'meta' ? 'Meta' : prov === 'linkedin' ? 'LinkedIn' : prov === 'smtp' ? 'SMTP' : 'Apollo'}
+                            {prov === 'openrouter' ? 'OpenRouter' : prov === 'together' ? 'Together' : prov === 'groq' ? 'Groq' : prov === 'anthropic' ? 'Claude' : prov === 'openai' ? 'GPT' : prov === 'gemini' ? 'Gemini' : prov === 'meta' ? 'Meta' : prov === 'linkedin' ? 'LinkedIn' : prov === 'smtp' ? 'SMTP' : 'Apollo'}
                           </span>
                         ))}
                       </div>
@@ -200,26 +200,63 @@ export default function OrchestratorView({
                       <Select value={orchProvider} onValueChange={(val) => {
                         if (val) {
                           setOrchProvider(val);
-                          if (val === 'anthropic') setOrchModel('claude-sonnet-4-6');
+                          if (val === 'openrouter') setOrchModel('google/gemini-2.5-flash');
+                          else if (val === 'together') setOrchModel('meta-llama/Llama-3.3-70B-Instruct-Turbo');
+                          else if (val === 'groq') setOrchModel('llama-3.3-70b-versatile');
+                          else if (val === 'grok') setOrchModel('grok-2-latest');
+                          else if (val === 'anthropic') setOrchModel('claude-sonnet-4-6');
                           else if (val === 'openai') setOrchModel('gpt-4o');
                           else if (val === 'gemini') setOrchModel('gemini-2.5-pro');
                         }
                       }}>
-                        <SelectTrigger className="bg-gray-900/60 border-gray-800 text-white rounded-lg h-7 text-[10px] w-[100px] focus:border-violet-500 focus:ring-0">
+                        <SelectTrigger className="bg-gray-900/60 border-gray-800 text-white rounded-lg h-7 text-[10px] w-[110px] focus:border-violet-500 focus:ring-0">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent className="bg-gray-900 border-gray-800 text-white">
+                          <SelectItem value="openrouter">OpenRouter</SelectItem>
+                          <SelectItem value="together">Together AI</SelectItem>
+                          <SelectItem value="groq">Groq</SelectItem>
                           <SelectItem value="anthropic">Claude</SelectItem>
                           <SelectItem value="openai">OpenAI</SelectItem>
                           <SelectItem value="gemini">Gemini</SelectItem>
+                          <SelectItem value="grok">Grok</SelectItem>
                         </SelectContent>
                       </Select>
 
                       <Select value={orchModel} onValueChange={(val) => val && setOrchModel(val)}>
-                        <SelectTrigger className="bg-gray-900/60 border-gray-800 text-white rounded-lg h-7 text-[10px] w-[120px] focus:border-violet-500 focus:ring-0">
+                        <SelectTrigger className="bg-gray-900/60 border-gray-800 text-white rounded-lg h-7 text-[10px] w-[140px] focus:border-violet-500 focus:ring-0">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent className="bg-gray-900 border-gray-800 text-white">
+                          {orchProvider === 'openrouter' && (
+                            <>
+                              <SelectItem value="google/gemini-2.5-flash">Gemini 2.5 Flash</SelectItem>
+                              <SelectItem value="google/gemini-2.5-pro">Gemini 2.5 Pro</SelectItem>
+                              <SelectItem value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</SelectItem>
+                              <SelectItem value="openai/gpt-4o">GPT-4o</SelectItem>
+                              <SelectItem value="openai/gpt-4o-mini">GPT-4o-mini</SelectItem>
+                              <SelectItem value="deepseek/deepseek-chat">DeepSeek Chat</SelectItem>
+                              <SelectItem value="deepseek/deepseek-r1">DeepSeek R1</SelectItem>
+                              <SelectItem value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B</SelectItem>
+                              <SelectItem value="qwen/qwen-2.5-72b-instruct">Qwen 2.5 72B</SelectItem>
+                            </>
+                          )}
+                          {orchProvider === 'together' && (
+                            <>
+                              <SelectItem value="meta-llama/Llama-3.3-70B-Instruct-Turbo">Llama 3.3 70B Turbo</SelectItem>
+                              <SelectItem value="meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo">Llama 3.1 8B Turbo</SelectItem>
+                              <SelectItem value="deepseek-ai/DeepSeek-V3">DeepSeek V3</SelectItem>
+                              <SelectItem value="deepseek-ai/DeepSeek-R1">DeepSeek R1</SelectItem>
+                              <SelectItem value="Qwen/Qwen2.5-72B-Instruct-Turbo">Qwen 2.5 72B Turbo</SelectItem>
+                            </>
+                          )}
+                          {orchProvider === 'groq' && (
+                            <>
+                              <SelectItem value="llama-3.3-70b-versatile">Llama 3.3 70B</SelectItem>
+                              <SelectItem value="llama-3.1-8b-instant">Llama 3.1 8B Instant</SelectItem>
+                              <SelectItem value="mixtral-8x7b-32768">Mixtral 8x7B</SelectItem>
+                            </>
+                          )}
                           {orchProvider === 'anthropic' && (
                             <>
                               <SelectItem value="claude-sonnet-4-6">Sonnet 4.6</SelectItem>
@@ -238,6 +275,13 @@ export default function OrchestratorView({
                               <SelectItem value="gemini-2.5-pro">2.5 Pro</SelectItem>
                               <SelectItem value="gemini-2.5-flash">2.5 Flash</SelectItem>
                               <SelectItem value="gemini-2.0-flash">2.0 Flash</SelectItem>
+                            </>
+                          )}
+                          {orchProvider === 'grok' && (
+                            <>
+                              <SelectItem value="grok-2-latest">Grok 2 Latest</SelectItem>
+                              <SelectItem value="grok-2-vision-latest">Grok 2 Vision</SelectItem>
+                              <SelectItem value="grok-beta">Grok Beta</SelectItem>
                             </>
                           )}
                         </SelectContent>
@@ -319,8 +363,11 @@ export default function OrchestratorView({
                                       if (!orchInlineKeyValue) return;
                                       let detectedProvider = 'anthropic';
                                       if (orchInlineKeyValue.startsWith('sk-ant')) detectedProvider = 'anthropic';
+                                      else if (orchInlineKeyValue.startsWith('sk-or-')) detectedProvider = 'openrouter';
                                       else if (orchInlineKeyValue.startsWith('sk-')) detectedProvider = 'openai';
                                       else if (orchInlineKeyValue.startsWith('AIza')) detectedProvider = 'gemini';
+                                      else if (orchInlineKeyValue.startsWith('gsk_')) detectedProvider = 'groq';
+                                      else if (orchInlineKeyValue.startsWith('xai-')) detectedProvider = 'grok';
                                       try {
                                         await fetchWithAuth(`${API_URL}/commands/keys`, {
                                           method: 'POST',

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List
-from app.db.session import get_db
+from app.api.deps import get_db
 from app.services.federated_learning_service import FederatedLearningService
 from app.services.skill_synthesizer import skill_synthesizer
 from app.models.learning import (

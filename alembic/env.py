@@ -25,6 +25,12 @@ from app.models.agents import ActivityLog, KnowledgeDocument
 from app.models.verticals import ContentPost, Lead, Candidate, Contract, Transaction, Ticket, TicketMessage, AgentMeeting, BusinessProfile
 from app.models.workflows import Workflow, WorkflowTask
 from app.models.video import VideoProject, VideoAsset, VideoRender
+from app.models.deal_room import DealRoom, BuyingCommitteeMember, AccountSignal, DealObjection, DealActivity, SuppressionRecord, EvidenceRecord, CompanySalesContext
+from app.models.learning import DecisionRecord, StrategyPerformance, NegativePatternMemory, GlobalStrategyRegistry, GlobalFailurePattern, GlobalSkillPackage
+from app.models.memory import GlobalMemory, EpisodicMemory, CrossAgentContext, ManagerFeedback
+from app.models import enterprise  # noqa: F401 — registers enterprise tables on Base.metadata
+from app.models.boardroom_events import MeetingEvent, MeetingEvidence, MeetingAction  # noqa: F401 — boardroom v2
+from app.models import flow_engine  # noqa: F401 — Agent Studio, Flow Engine, Telemetry & Marketplace
 
 target_metadata = Base.metadata
 

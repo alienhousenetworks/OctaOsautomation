@@ -71,12 +71,22 @@ class SecretValidationService:
         elif provider_lower == "anthropic":
             # sk-ant-...
             return bool(re.match(r"^sk-ant-[a-zA-Z0-9_-]{20,}$", api_key))
+        elif provider_lower == "openrouter":
+            return bool(re.match(r"^sk-or-[a-zA-Z0-9_-]{10,}$", api_key)) or len(api_key) >= 15
+        elif provider_lower in ("together", "togetherapi"):
+            return len(api_key) >= 15
+        elif provider_lower == "groq":
+            return bool(re.match(r"^gsk_[a-zA-Z0-9_-]{15,}$", api_key)) or len(api_key) >= 15
+        elif provider_lower in ("grok", "xai"):
+            return bool(re.match(r"^xai-[a-zA-Z0-9_-]{15,}$", api_key)) or len(api_key) >= 15
         elif provider_lower == "gemini":
             # API keys are typically ~40 chars long
             return len(api_key) >= 20
         elif provider_lower.startswith("smtp"):
             # smtp://username:password@host:port
             return api_key.startswith("smtp://") or "@" in api_key
+        elif provider_lower == "ai_mode":
+            return api_key.lower() in ("inbuilt", "byok")
         # Default minimum validation length
         return len(api_key) >= 8
 

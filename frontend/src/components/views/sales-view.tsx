@@ -13,6 +13,7 @@ import {
   ChevronRight, Calendar, Loader2, Bot, Check, X, Phone, Mail, Building, Users, LayoutGrid, Target, Cpu, Sparkles, Activity,
   Download, CheckSquare, AlertCircle, ListFilter, Trash2
 } from 'lucide-react';
+import DealRoomView from './deal-room-view';
 
 interface SalesViewProps {
   token: string | null;
@@ -61,7 +62,7 @@ export default function SalesView({
   const [salesActionLoading, setSalesActionLoading] = useState(false);
 
   // Sales AI V3 States
-  const [activeSalesTab, setActiveSalesTab] = useState<'pipeline' | 'config' | 'stepper' | 'analytics'>('pipeline');
+  const [activeSalesTab, setActiveSalesTab] = useState<'deal_rooms' | 'pipeline' | 'config' | 'stepper' | 'analytics'>('deal_rooms');
   const [salesTextProvider, setSalesTextProvider] = useState('auto');
   const [salesTextModel, setSalesTextModel] = useState('');
   const [salesTargetLeadCount, setSalesTargetLeadCount] = useState<number>(50);
@@ -1163,10 +1164,20 @@ export default function SalesView({
               </Card>
 
               {/* V3 Sales AI Navigation Tabs */}
-              <div className="flex gap-2 p-1 bg-gray-900/60 border border-[rgba(16,185,129,0.2)] rounded-2xl max-w-lg z-10 relative">
+              <div className="flex gap-2 p-1 bg-gray-900/60 border border-[rgba(16,185,129,0.2)] rounded-2xl max-w-2xl z-10 relative">
+                <button
+                  onClick={() => setActiveSalesTab('deal_rooms')}
+                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-black tracking-wide transition-all ${
+                    activeSalesTab === 'deal_rooms'
+                      ? 'bg-[rgba(6,182,212,0.18)] text-cyan-400 border border-[rgba(6,182,212,0.5)] shadow-[0_0_15px_rgba(6,182,212,0.25)]'
+                      : 'text-gray-400 hover:text-white hover:bg-gray-800/40 border border-transparent'
+                  }`}
+                >
+                  🏢 Deal Rooms OS
+                </button>
                 <button
                   onClick={() => setActiveSalesTab('pipeline')}
-                  className={`flex-1 py-2 px-4 rounded-xl text-xs font-black tracking-wide transition-all ${
+                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-black tracking-wide transition-all ${
                     activeSalesTab === 'pipeline'
                       ? 'bg-[rgba(16,185,129,0.15)] text-emerald-400 border border-[rgba(16,185,129,0.4)] shadow-[0_0_15px_rgba(16,185,129,0.2)]'
                       : 'text-gray-400 hover:text-white hover:bg-gray-800/40 border border-transparent'
@@ -1176,7 +1187,7 @@ export default function SalesView({
                 </button>
                 <button
                   onClick={() => setActiveSalesTab('config')}
-                  className={`flex-1 py-2 px-4 rounded-xl text-xs font-black tracking-wide transition-all ${
+                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-black tracking-wide transition-all ${
                     activeSalesTab === 'config'
                       ? 'bg-[rgba(16,185,129,0.15)] text-emerald-400 border border-[rgba(16,185,129,0.4)] shadow-[0_0_15px_rgba(16,185,129,0.2)]'
                       : 'text-gray-400 hover:text-white hover:bg-gray-800/40 border border-transparent'
@@ -1186,7 +1197,7 @@ export default function SalesView({
                 </button>
                 <button
                   onClick={() => setActiveSalesTab('stepper')}
-                  className={`flex-1 py-2 px-4 rounded-xl text-xs font-black tracking-wide transition-all relative ${
+                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-black tracking-wide transition-all relative ${
                     activeSalesTab === 'stepper'
                       ? 'bg-[rgba(16,185,129,0.15)] text-emerald-400 border border-[rgba(16,185,129,0.4)] shadow-[0_0_15px_rgba(16,185,129,0.2)]'
                       : 'text-gray-400 hover:text-white hover:bg-gray-800/40 border border-transparent'
@@ -1202,15 +1213,19 @@ export default function SalesView({
                 </button>
                 <button
                   onClick={() => setActiveSalesTab('analytics')}
-                  className={`flex-1 py-2 px-4 rounded-xl text-xs font-black tracking-wide transition-all ${
+                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-black tracking-wide transition-all ${
                     activeSalesTab === 'analytics'
                       ? 'bg-[rgba(16,185,129,0.15)] text-emerald-400 border border-[rgba(16,185,129,0.4)] shadow-[0_0_15px_rgba(16,185,129,0.2)]'
                       : 'text-gray-400 hover:text-white hover:bg-gray-800/40 border border-transparent'
                   }`}
                 >
-                  📈 Revenue Analytics
+                  📈 Revenue
                 </button>
               </div>
+
+              {activeSalesTab === 'deal_rooms' && (
+                <DealRoomView token={token} API_URL={API_URL} fetchWithAuth={fetchWithAuth} />
+              )}
 
               {activeSalesTab === 'pipeline' && (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -2356,6 +2371,9 @@ export default function SalesView({
                             </SelectTrigger>
                             <SelectContent className="bg-gray-950 border-gray-800 text-white">
                               <SelectItem value="auto" className="font-bold text-amber-400">✨ Auto (AI Choice)</SelectItem>
+                              <SelectItem value="openrouter">OpenRouter (Meta-Hub)</SelectItem>
+                              <SelectItem value="together">Together AI (Meta-Hub)</SelectItem>
+                              <SelectItem value="groq">Groq (Ultra-Fast)</SelectItem>
                               <SelectItem value="gemini">Google Gemini</SelectItem>
                               <SelectItem value="openai">OpenAI</SelectItem>
                               <SelectItem value="anthropic">Anthropic</SelectItem>
@@ -2367,6 +2385,28 @@ export default function SalesView({
                             </SelectTrigger>
                             <SelectContent className="bg-gray-950 border-gray-800 text-white">
                               <SelectItem value="">Default</SelectItem>
+                              {salesTextProvider === 'openrouter' && (
+                                <>
+                                  <SelectItem value="google/gemini-2.5-flash">Gemini 2.5 Flash</SelectItem>
+                                  <SelectItem value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</SelectItem>
+                                  <SelectItem value="openai/gpt-4o">GPT-4o</SelectItem>
+                                  <SelectItem value="deepseek/deepseek-chat">DeepSeek Chat</SelectItem>
+                                  <SelectItem value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B</SelectItem>
+                                </>
+                              )}
+                              {salesTextProvider === 'together' && (
+                                <>
+                                  <SelectItem value="meta-llama/Llama-3.3-70B-Instruct-Turbo">Llama 3.3 70B Turbo</SelectItem>
+                                  <SelectItem value="deepseek-ai/DeepSeek-V3">DeepSeek V3</SelectItem>
+                                  <SelectItem value="Qwen/Qwen2.5-72B-Instruct-Turbo">Qwen 2.5 72B Turbo</SelectItem>
+                                </>
+                              )}
+                              {salesTextProvider === 'groq' && (
+                                <>
+                                  <SelectItem value="llama-3.3-70b-versatile">Llama 3.3 70B</SelectItem>
+                                  <SelectItem value="llama-3.1-8b-instant">Llama 3.1 8B Instant</SelectItem>
+                                </>
+                              )}
                               {salesTextProvider === 'gemini' && (
                                 <>
                                   <SelectItem value="gemini-2.5-flash">Gemini 2.5 Flash</SelectItem>

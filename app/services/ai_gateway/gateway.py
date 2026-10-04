@@ -12,7 +12,8 @@ from app.core.observability import metrics_registry
 
 from app.services.ai_gateway.adapters import (
     BaseProviderAdapter, OpenAIAdapter, AnthropicAdapter, GeminiAdapter,
-    GrokAdapter, GroqAdapter, MistralAdapter, CohereAdapter, LocalAdapter
+    GrokAdapter, GroqAdapter, MistralAdapter, CohereAdapter, LocalAdapter,
+    OpenRouterAdapter, TogetherAdapter
 )
 from app.services.ai_gateway.caching import PromptOptimizationEngine
 from app.services.ai_gateway.routing import AIRoutingEngine
@@ -32,14 +33,18 @@ class AIProviderGateway:
 
     def _get_adapter(self, provider: str, api_key: str) -> BaseProviderAdapter:
         # Returns or instantiates the adapter for the given provider
-        provider_lower = provider.lower()
+        provider_lower = (provider or "").lower().strip()
         if provider_lower == "openai":
             return OpenAIAdapter(api_key=api_key)
+        elif provider_lower == "openrouter":
+            return OpenRouterAdapter(api_key=api_key)
+        elif provider_lower in ("together", "togetherapi", "together_ai"):
+            return TogetherAdapter(api_key=api_key)
         elif provider_lower == "anthropic":
             return AnthropicAdapter(api_key=api_key)
         elif provider_lower == "gemini":
             return GeminiAdapter(api_key=api_key)
-        elif provider_lower == "grok":
+        elif provider_lower in ("grok", "xai"):
             return GrokAdapter(api_key=api_key)
         elif provider_lower == "groq":
             return GroqAdapter(api_key=api_key)
@@ -64,63 +69,166 @@ class AIProviderGateway:
     ) -> tuple:
         return AIRoutingEngine.selectProvider(configured_providers, complexity, realtime, bulk)
 
-    def _get_api_key(self, db: Session, tenant_id: str, provider: str) -> str:
-        # Lookup key from database APICredential
-        if tenant_id:
+    def get_tenant_ai_mode(self, db: Session, tenant_id: str) -> str:
+        """
+        Returns 'inbuilt' or 'byok' for the tenant.
+        Checks APICredential with provider='ai_mode'.
+        If not set, defaults to 'byok' if tenant has configured credentials,
+        or settings.DEFAULT_AI_MODE ('inbuilt') if system env keys exist.
+        """
+        if tenant_id and db:
             cred = db.query(APICredential).filter(
                 APICredential.tenant_id == tenant_id,
-                APICredential.provider == provider
+                APICredential.provider == "ai_mode"
+            ).first()
+            if cred and cred.settings and "mode" in cred.settings:
+                return cred.settings["mode"].lower()
+            # If tenant has configured any AI brain credential, default to byok
+            has_creds = db.query(APICredential).filter(
+                APICredential.tenant_id == tenant_id,
+                APICredential.provider.in_(["openrouter", "together", "groq", "grok", "anthropic", "openai", "gemini"])
+            ).first()
+            if has_creds:
+                return "byok"
+        return (getattr(settings, "DEFAULT_AI_MODE", None) or "inbuilt").lower()
+
+    def set_tenant_ai_mode(self, db: Session, tenant_id: str, mode: str) -> str:
+        """Sets the tenant's AI mode ('inbuilt' or 'byok')."""
+        normalized = "byok" if mode.lower() == "byok" else "inbuilt"
+        if not tenant_id or not db:
+            return normalized
+        cred = db.query(APICredential).filter(
+            APICredential.tenant_id == tenant_id,
+            APICredential.provider == "ai_mode"
+        ).first()
+        if not cred:
+            cred = APICredential(
+                tenant_id=tenant_id,
+                provider="ai_mode",
+                encrypted_key="",
+                settings={"mode": normalized}
+            )
+            db.add(cred)
+        else:
+            curr = dict(cred.settings or {})
+            curr["mode"] = normalized
+            cred.settings = curr
+        db.commit()
+        return normalized
+
+    def _get_system_env_key(self, provider: str) -> str:
+        p = (provider or "").lower().strip()
+        import os
+        if p == "openrouter":
+            return getattr(settings, "OPENROUTER_API_KEY", None) or os.getenv("OPENROUTER_API_KEY") or ""
+        elif p in ("together", "togetherapi", "together_ai"):
+            return (
+                getattr(settings, "TOGETHER_API_KEY", None)
+                or os.getenv("TOGETHER_API_KEY")
+                or getattr(settings, "TOGETHERAI_API_KEY", None)
+                or os.getenv("TOGETHERAI_API_KEY")
+                or ""
+            )
+        elif p == "groq":
+            return getattr(settings, "GROQ_API_KEY", None) or os.getenv("GROQ_API_KEY") or ""
+        elif p in ("grok", "xai"):
+            return (
+                getattr(settings, "GROK_API_KEY", None)
+                or os.getenv("GROK_API_KEY")
+                or getattr(settings, "XAI_API_KEY", None)
+                or os.getenv("XAI_API_KEY")
+                or ""
+            )
+        elif p == "anthropic":
+            return settings.SHARED_CLAUDE_KEY or settings.ANTHROPIC_API_KEY or os.getenv("ANTHROPIC_API_KEY") or ""
+        elif p == "openai":
+            return settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY") or ""
+        elif p == "gemini":
+            return (
+                getattr(settings, "GEMINI_API_KEY", None)
+                or os.getenv("GEMINI_API_KEY")
+                or getattr(settings, "GOOGLE_API_KEY", None)
+                or os.getenv("GOOGLE_API_KEY")
+                or ""
+            )
+        elif p == "mistral":
+            return os.getenv("MISTRAL_API_KEY") or ""
+        elif p == "cohere":
+            return os.getenv("COHERE_API_KEY") or ""
+        elif p == "firecrawl":
+            return getattr(settings, "FIRECRAWL_API_KEY", None) or os.getenv("FIRECRAWL_API_KEY") or ""
+        return ""
+
+    def _get_api_key(self, db: Session, tenant_id: str, provider: str) -> str:
+        provider_lower = (provider or "").lower().strip()
+        if provider_lower in ("togetherapi", "together_ai"):
+            provider_lower = "together"
+        elif provider_lower in ("xai",):
+            provider_lower = "grok"
+
+        # Check tenant's configured mode
+        mode = self.get_tenant_ai_mode(db, tenant_id)
+
+        # 1. If in BYOK mode: lookup key from database APICredential
+        if mode == "byok" and tenant_id:
+            cred = db.query(APICredential).filter(
+                APICredential.tenant_id == tenant_id,
+                APICredential.provider == provider_lower
             ).first()
             if cred and cred.encrypted_key:
                 return decrypt_api_key(cred.encrypted_key)
-        
-        # System settings keys fallback
-        if provider == "anthropic":
-            return settings.SHARED_CLAUDE_KEY or settings.ANTHROPIC_API_KEY or ""
-        elif provider == "openai":
-            return settings.OPENAI_API_KEY or ""
-        elif provider == "gemini":
-            import os
-            return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-        elif provider == "grok":
-            import os
-            return os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or ""
-        elif provider == "groq":
-            import os
-            return os.getenv("GROQ_API_KEY") or ""
-        elif provider == "mistral":
-            import os
-            return os.getenv("MISTRAL_API_KEY") or ""
-        elif provider == "cohere":
-            import os
-            return os.getenv("COHERE_API_KEY") or ""
+            return ""
+
+        # 2. If in Inbuilt mode or tenant_id is empty: use server environment settings
+        system_key = self._get_system_env_key(provider_lower)
+        if system_key:
+            return system_key
+
+        # 3. Fallback: if server key is not in env, check if tenant has a BYOK credential
+        if tenant_id:
+            cred = db.query(APICredential).filter(
+                APICredential.tenant_id == tenant_id,
+                APICredential.provider == provider_lower
+            ).first()
+            if cred and cred.encrypted_key:
+                return decrypt_api_key(cred.encrypted_key)
+
         return ""
 
     def _get_configured_providers(self, db: Session, tenant_id: str) -> List[str]:
-        configured = []
+        configured = set()
+        mode = self.get_tenant_ai_mode(db, tenant_id)
+
+        # In BYOK mode: prioritize tenant's own credentials
+        if mode == "byok" and tenant_id:
+            creds = db.query(APICredential).filter(APICredential.tenant_id == tenant_id).all()
+            for c in creds:
+                if c.encrypted_key and c.provider not in ("ai_mode",):
+                    p = c.provider.lower()
+                    if p in ("togetherapi", "together_ai"):
+                        p = "together"
+                    elif p in ("xai",):
+                        p = "grok"
+                    configured.add(p)
+
+        # In Inbuilt mode (or if no BYOK keys found): include server environment keys
+        for p in ["openrouter", "together", "groq", "grok", "anthropic", "openai", "gemini", "mistral", "cohere"]:
+            if self._get_system_env_key(p):
+                configured.add(p)
+
+        # If tenant has BYOK credentials even in Inbuilt mode, include them as well
         if tenant_id:
             creds = db.query(APICredential).filter(APICredential.tenant_id == tenant_id).all()
-            configured.extend([c.provider.lower() for c in creds if c.encrypted_key])
-            
-        # Check system/env config too
-        if settings.ANTHROPIC_API_KEY or settings.SHARED_CLAUDE_KEY:
-            configured.append("anthropic")
-        if settings.OPENAI_API_KEY:
-            configured.append("openai")
-            
-        import os
-        if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
-            configured.append("gemini")
-        if os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY"):
-            configured.append("grok")
-        if os.getenv("GROQ_API_KEY"):
-            configured.append("groq")
-        if os.getenv("MISTRAL_API_KEY"):
-            configured.append("mistral")
-        if os.getenv("COHERE_API_KEY"):
-            configured.append("cohere")
-            
-        return list(set(configured))
+            for c in creds:
+                if c.encrypted_key and c.provider not in ("ai_mode",):
+                    p = c.provider.lower()
+                    if p in ("togetherapi", "together_ai"):
+                        p = "together"
+                    elif p in ("xai",):
+                        p = "grok"
+                    configured.add(p)
+
+        return list(configured)
 
     async def executeRequest(
         self,
@@ -154,9 +262,33 @@ class AIProviderGateway:
         current_provider = provider
         current_model = model
         
-        # Default chain of fallback providers
-        fallback_chain = ["openai", "anthropic", "gemini", "grok", "groq"]
+        # Default chain of fallback providers for safety & redundancy
+        primary_pref = (getattr(settings, "DEFAULT_AI_PROVIDER", None) or "openrouter").lower().strip()
+        all_vendors = ["openrouter", "together", "groq", "grok", "openai", "anthropic", "gemini"]
+        # Ensure primary is tried first, then others
+        fallback_chain = [primary_pref] + [v for v in all_vendors if v != primary_pref]
         
+        def _get_failover_model(prov: str, original_model: Optional[str] = None) -> str:
+            prov_lower = (prov or "").lower().strip()
+            if prov_lower == "openrouter":
+                # If original model was on another provider, OpenRouter can route it directly or use default
+                if original_model and ("/" in original_model or "gpt" in original_model or "claude" in original_model):
+                    return original_model
+                return getattr(settings, "DEFAULT_AI_MODEL", None) or "google/gemini-2.5-flash"
+            elif prov_lower in ("together", "togetherapi"):
+                return "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+            elif prov_lower == "groq":
+                return "llama-3.3-70b-versatile"
+            elif prov_lower in ("grok", "xai"):
+                return "grok-2"
+            elif prov_lower == "openai":
+                return "gpt-4o-mini"
+            elif prov_lower == "anthropic":
+                return "claude-haiku-4-5-20251001"
+            elif prov_lower == "gemini":
+                return "gemini-2.5-flash"
+            return "default-model"
+
         while current_provider:
             tried_providers.append(current_provider)
             api_key = self._get_api_key(db, tenant_id, current_provider)
@@ -199,22 +331,11 @@ class AIProviderGateway:
                     raise ValueError(
                         f"No API key configured for any provider. "
                         f"Please go to Platform Setup → API Settings and add a provider key "
-                        f"(OpenAI, Anthropic, Gemini, Groq, etc.)."
+                        f"(OpenRouter, Together AI, Groq, Grok, OpenAI, Anthropic, Gemini)."
                     )
                 
                 current_provider = configured_remaining[0]
-                if current_provider == "openai":
-                    current_model = "gpt-4o-mini"
-                elif current_provider == "anthropic":
-                    current_model = "claude-haiku-4-5-20251001"
-                elif current_provider == "gemini":
-                    current_model = "gemini-2.5-flash"
-                elif current_provider == "grok":
-                    current_model = "grok-2"
-                elif current_provider == "groq":
-                    current_model = "llama-3.1-8b-instant"
-                else:
-                    current_model = "default-model"
+                current_model = _get_failover_model(current_provider, model)
                 continue
                 
             try:
@@ -288,7 +409,7 @@ class AIProviderGateway:
                 
             except Exception as e:
                 latency = time.time() - start_time
-                logger.error(f"Execution failed on {current_provider}: {e}. Activating failover.")
+                logger.error(f"Execution failed on {current_provider}: {e}. Activating safety failover.")
                 
                 # Log failed attempt
                 usage_failed = ProviderUsage(
@@ -324,18 +445,7 @@ class AIProviderGateway:
                     )
                 
                 current_provider = configured_remaining[0]
-                if current_provider == "openai":
-                    current_model = "gpt-4o-mini"
-                elif current_provider == "anthropic":
-                    current_model = "claude-haiku-4-5-20251001"
-                elif current_provider == "gemini":
-                    current_model = "gemini-2.5-flash"
-                elif current_provider == "grok":
-                    current_model = "grok-2"
-                elif current_provider == "groq":
-                    current_model = "llama-3.1-8b-instant"
-                else:
-                    current_model = "default-model"
+                current_model = _get_failover_model(current_provider, model)
                 continue
 
         raise Exception("All configured providers failed.")
@@ -346,17 +456,20 @@ class AIProviderGateway:
         """
         for p in fallback_chain:
             if p not in tried_providers:
-                # Select a default model for this provider
-                if p == "openai":
+                if p == "openrouter":
+                    return "openrouter", getattr(settings, "DEFAULT_AI_MODEL", None) or "google/gemini-2.5-flash"
+                elif p in ("together", "togetherapi"):
+                    return "together", "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+                elif p == "groq":
+                    return "groq", "llama-3.3-70b-versatile"
+                elif p in ("grok", "xai"):
+                    return "grok", "grok-2"
+                elif p == "openai":
                     return "openai", "gpt-4o-mini"
                 elif p == "anthropic":
                     return "anthropic", "claude-haiku-4-5-20251001"
                 elif p == "gemini":
                     return "gemini", "gemini-2.5-flash"
-                elif p == "grok":
-                    return "grok", "grok-2"
-                elif p == "groq":
-                    return "groq", "llama-3.1-8b-instant"
                 elif p == "local":
                     return "local", "llama3"
                     

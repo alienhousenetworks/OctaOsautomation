@@ -33,7 +33,7 @@ def get_optimization_metrics(
     
     # Pre-fill structure for all expected providers
     provider_metrics = {}
-    for p in ["openai", "anthropic", "gemini", "grok", "groq", "mistral", "cohere", "local"]:
+    for p in ["openrouter", "together", "openai", "anthropic", "gemini", "grok", "groq", "mistral", "cohere", "local"]:
         provider_metrics[p] = {
             "spend": 0.0,
             "input_tokens": 0,
@@ -266,3 +266,35 @@ def plan_ai_task(
         "estimated_cost_per_1m_tokens": f"${spec['input_cost_1m'] + spec['output_cost_1m']:.2f}",
         "estimated_latency": f"{spec['latency']}s" if isinstance(spec['latency'], (float, int)) else spec['latency']
     }
+
+
+@router.get("/models")
+def get_available_models(
+    db: Session = Depends(deps.get_db),
+    tenant_id: str = Depends(deps.get_current_tenant_id)
+) -> Any:
+    from app.services.ai_gateway.routing import get_provider_models
+    from app.core.config import settings
+
+    active_providers = ai_gateway._get_configured_providers(db, tenant_id)
+    mode = ai_gateway.get_tenant_ai_mode(db, tenant_id)
+
+    catalogue = {}
+    all_supported = ["openrouter", "together", "groq", "grok", "anthropic", "openai", "gemini"]
+    for p in all_supported:
+        models = get_provider_models(p)
+        catalogue[p] = {
+            "provider": p,
+            "is_active": p in active_providers,
+            "models": [m["model"] for m in models],
+            "model_specs": models
+        }
+
+    return {
+        "ai_mode": mode,
+        "default_provider": getattr(settings, "DEFAULT_AI_PROVIDER", "openrouter"),
+        "default_model": getattr(settings, "DEFAULT_AI_MODEL", None),
+        "active_providers": active_providers,
+        "providers": catalogue
+    }
+

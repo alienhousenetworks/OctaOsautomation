@@ -87,68 +87,41 @@ class KnowledgeRAGService:
         department: Optional[str] = None,
         top_k: int = 5,
     ) -> List[Dict[str, Any]]:
-        q = (
-            self.db.query(KnowledgeChunk)
-            .filter(
-                KnowledgeChunk.tenant_id == self.tenant_id,
-                KnowledgeChunk.is_active == True,  # noqa: E712
-            )
-        )
-        if department:
-            q = q.filter(KnowledgeChunk.department.in_([department, "General", "general"]))
-        chunks = q.limit(200).all()
-        if not chunks:
-            # fallback to raw documents
-            docs = (
-                self.db.query(KnowledgeDocument)
-                .filter(KnowledgeDocument.tenant_id == self.tenant_id)
-                .all()
-            )
-            results = []
-            query_tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", query.lower()))
-            for d in docs:
-                content = d.content or ""
-                tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", content.lower()))
-                score = len(query_tokens & tokens)
-                if score > 0:
-                    results.append(
-                        {
-                            "chunk_id": None,
-                            "document_id": d.id,
-                            "title": d.doc_type,
-                            "department": d.department,
-                            "content": content[:1200],
-                            "score": score,
-                            "citation": f"[{d.doc_type}] (doc:{d.id[:8]})",
-                        }
-                    )
-            results.sort(key=lambda x: x["score"], reverse=True)
-            return results[:top_k]
+        from app.services.rag.hybrid_engine import HybridRAGEngine
+        engine = HybridRAGEngine(self.db, self.tenant_id)
+        hits = engine.retrieve(query, department=department, top_k=top_k)
+        if hits:
+            return hits
 
-        query_tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", query.lower()))
-        scored = []
-        for c in chunks:
-            tokens = set((c.embedding_hint or "").split()) | set(
-                re.findall(r"[a-zA-Z0-9]{3,}", (c.content or "").lower())
+        # Fallback to raw documents if no chunk hits
+        docs = (
+            self.db.query(KnowledgeDocument)
+            .filter(
+                KnowledgeDocument.tenant_id == self.tenant_id,
+                KnowledgeDocument.is_active == True,
             )
+            .all()
+        )
+        results = []
+        query_tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", query.lower()))
+        for d in docs:
+            content = d.content or ""
+            tokens = set(re.findall(r"[a-zA-Z0-9]{3,}", content.lower()))
             score = len(query_tokens & tokens)
-            if score > 0 or query.lower() in (c.content or "").lower():
-                if query.lower() in (c.content or "").lower():
-                    score += 5
-                scored.append(
+            if score > 0 or query.lower() in content.lower():
+                results.append(
                     {
-                        "chunk_id": c.id,
-                        "document_id": c.document_id,
-                        "title": c.title,
-                        "department": c.department,
-                        "content": c.content,
-                        "score": score,
-                        "version": c.version,
-                        "citation": f"[{c.title or 'KB'}] (chunk:{c.id[:8]} v{c.version})",
+                        "chunk_id": None,
+                        "document_id": d.id,
+                        "title": d.doc_type,
+                        "department": d.department,
+                        "content": content[:1200],
+                        "score": score + (5 if query.lower() in content.lower() else 0),
+                        "citation": f"[{d.doc_type}] (doc:{d.id[:8]})",
                     }
                 )
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:top_k]
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_k]
 
     def answer_context(
         self,

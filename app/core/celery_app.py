@@ -57,6 +57,10 @@ celery_app.conf.beat_schedule = {
         "task": "sync_marketing_insights_task",
         "schedule": crontab(minute="20", hour="*/6"),  # every 6 hours
     },
+    "recrawl-knowledge-sources": {
+        "task": "recrawl_due_knowledge_sources_task",
+        "schedule": crontab(minute="45", hour="*/4"),  # every 4 hours
+    },
 }
 
 if os.getenv("TESTING"):

@@ -2,12 +2,29 @@ import json
 import asyncio
 import uuid
 import datetime
+import logging
+from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from app.models.base import APICredential
 from app.models.agents import ActivityLog, KnowledgeDocument
 from app.models.verticals import Ticket, TicketMessage, Lead, Candidate, AgentMeeting, Contract, Transaction
+from app.models.boardroom_events import MeetingEvent, MeetingEvidence, MeetingAction
+from app.services.agents.boardroom_state import (
+    transition,
+    emit_event,
+    classify_action,
+    AUTO_APPROVE_CONFIDENCE_THRESHOLD,
+)
+from app.schemas.boardroom import (
+    SpecialistAnalysis,
+    AgentCritique,
+    CEOSynthesis,
+    Finding,
+)
 from app.services.llm_gateway import LLMGateway
 from app.services.notifications.telegram import send_telegram_notification
+
+logger = logging.getLogger(__name__)
 
 class BoardroomService:
     UNIVERSAL_EXPERTS = [
@@ -38,10 +55,18 @@ class BoardroomService:
         (("hiring", "headcount", "workforce", "talent", "org design", "compensation", "hr"), "Human Resources Expert"),
     ]
 
-    def __init__(self, db: Session, tenant_id: str):
+    def __init__(
+        self,
+        db: Session,
+        tenant_id: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
         self.db = db
         self.tenant_id = tenant_id
         self.llm = LLMGateway(db, tenant_id)
+        self._provider = provider
+        self._model = model
 
     def build_decision_profile(self, title: str, context: str, industry=None, decision_category=None) -> dict:
         text = f"{title} {context}".lower()
@@ -185,10 +210,21 @@ class BoardroomService:
         return meeting
 
     async def run_meeting(self, meeting_id: str):
-        """Run an evidence-backed, parallel multi-agent boardroom workflow."""
+        """Run an evidence-backed, parallel multi-agent boardroom workflow with strict governance."""
         meeting = self.db.query(AgentMeeting).filter(AgentMeeting.id == meeting_id).first()
         if not meeting:
             return
+
+        meeting.started_at = datetime.datetime.now(datetime.timezone.utc)
+        transition(self.db, meeting, "assembly")
+        emit_event(
+            self.db,
+            meeting.id,
+            "meeting.started",
+            actor="system",
+            phase="assembly",
+            payload={"title": meeting.title, "trigger_type": meeting.trigger_type}
+        )
 
         participants = list(dict.fromkeys(meeting.participants or []))
         if "CEO AI" not in participants:
@@ -199,8 +235,41 @@ class BoardroomService:
             meeting.participants = participants
         specialists = [p for p in participants if p != "CEO AI"]
         context = meeting.context_summary or ""
+
+        # Phase: Evidence Gathering
+        transition(self.db, meeting, "evidence")
         evidence_pack = self._collect_evidence_pack(meeting)
         source_ids = {source["id"] for source in evidence_pack["sources"]}
+
+        # Persist typed evidence in DB
+        for src in evidence_pack.get("sources", []):
+            existing_ev = self.db.query(MeetingEvidence).filter(
+                MeetingEvidence.meeting_id == meeting.id,
+                MeetingEvidence.source_ref == src["id"]
+            ).first()
+            if not existing_ev:
+                rel = src.get("reliability", {})
+                new_ev = MeetingEvidence(
+                    meeting_id=meeting.id,
+                    source_ref=src["id"],
+                    source_type=src.get("type", "unknown"),
+                    trust_score=rel.get("overall_trust_score"),
+                    freshness_score=rel.get("freshness_score"),
+                    reliability_score=rel.get("reliability_score"),
+                    completeness_score=rel.get("completeness_score"),
+                    excerpt=src.get("summary", "")[:500],
+                )
+                self.db.add(new_ev)
+        self.db.commit()
+
+        emit_event(
+            self.db,
+            meeting.id,
+            "evidence.added",
+            actor="system",
+            phase="evidence",
+            payload={"sources_count": len(evidence_pack.get("sources", []))}
+        )
 
         transcript = [{
             "sender": "CEO AI",
@@ -213,10 +282,76 @@ class BoardroomService:
         meeting.transcript = transcript
         self.db.commit()
 
+        # Phase: Specialist Analysis
+        transition(self.db, meeting, "analysis")
+
+        async def _timed_specialist_analysis(agent: str) -> dict:
+            emit_event(
+                self.db,
+                meeting.id,
+                "agent.thinking",
+                actor=agent,
+                phase="analysis",
+                payload={"agent": agent, "status": "thinking"}
+            )
+            try:
+                res = await asyncio.wait_for(
+                    self._run_specialist_analysis(agent, meeting, context, evidence_pack),
+                    timeout=50.0
+                )
+                emit_event(
+                    self.db,
+                    meeting.id,
+                    "agent.completed",
+                    actor=agent,
+                    phase="analysis",
+                    payload={
+                        "agent": agent,
+                        "findings_count": len(res.get("findings", [])),
+                        "confidence": res.get("confidence_score")
+                    }
+                )
+                return res
+            except Exception as e:
+                logger.warning("Specialist analysis timed out/failed for %s: %s", agent, e)
+                emit_event(
+                    self.db,
+                    meeting.id,
+                    "agent.failed",
+                    actor=agent,
+                    phase="analysis",
+                    payload={"agent": agent, "error": str(e)}
+                )
+                return {
+                    "agent": agent,
+                    "findings": [f"Specialist analysis encountered an issue: {str(e)}"],
+                    "sources": ["meeting_context"],
+                    "assumptions": ["Agent execution exceeded timeout or raised exception."],
+                    "confidence_score": 0,
+                    "confidence_rationale": "Execution timeout or failure during specialist phase",
+                    "status": "failed"
+                }
+
         analyses = await asyncio.gather(*[
-            self._run_specialist_analysis(agent, meeting, context, evidence_pack)
+            _timed_specialist_analysis(agent)
             for agent in specialists
         ])
+
+        successes = [a for a in analyses if a.get("status") != "failed"]
+        if specialists and (len(successes) / len(specialists)) < 0.5:
+            meeting.failure_reason = f"Quorum failure: only {len(successes)}/{len(specialists)} completed."
+            meeting.status = "failed"
+            self.db.commit()
+            emit_event(
+                self.db,
+                meeting.id,
+                "meeting.failed",
+                actor="system",
+                phase="analysis",
+                payload={"error": meeting.failure_reason}
+            )
+            return
+
         analyses_by_agent = {item["agent"]: item for item in analyses}
 
         for item in analyses:
@@ -235,8 +370,37 @@ class BoardroomService:
         meeting.transcript = transcript
         self.db.commit()
 
+        # Phase: Cross-Agent Critique
+        transition(self.db, meeting, "critique")
+
+        async def _timed_critique(agent: str) -> dict:
+            try:
+                res = await asyncio.wait_for(
+                    self._run_cross_agent_critique(agent, meeting, context, evidence_pack, analyses_by_agent),
+                    timeout=45.0
+                )
+                emit_event(
+                    self.db,
+                    meeting.id,
+                    "critique.posted",
+                    actor=agent,
+                    phase="critique",
+                    payload={"agent": agent, "agreement_count": len(res.get("agreement_points", []))}
+                )
+                return res
+            except Exception as e:
+                logger.warning("Critique timed out/failed for %s: %s", agent, e)
+                return {
+                    "agent": agent,
+                    "agreement_points": [],
+                    "objections": [],
+                    "missing_information": [f"Critique timed out: {e}"],
+                    "risk_factors": [],
+                    "sources": ["meeting_context"]
+                }
+
         critiques = await asyncio.gather(*[
-            self._run_cross_agent_critique(agent, meeting, context, evidence_pack, analyses_by_agent)
+            _timed_critique(agent)
             for agent in specialists
         ])
 
@@ -251,19 +415,21 @@ class BoardroomService:
         meeting.transcript = transcript
         self.db.commit()
 
+        # Phase: Synthesis
+        transition(self.db, meeting, "synthesis")
+        emit_event(
+            self.db,
+            meeting.id,
+            "agent.thinking",
+            actor="CEO AI",
+            phase="synthesis",
+            payload={"agent": "CEO AI", "status": "synthesizing"}
+        )
+
         synthesis = await self._run_decision_synthesis(meeting, context, evidence_pack, analyses, critiques)
         confidence = self._derive_confidence(synthesis, analyses, critiques, evidence_pack)
         synthesis["confidence_score"] = confidence["score"]
         synthesis["confidence_rationale"] = confidence["rationale"]
-        final_actions = []
-        for item in synthesis.get("action_items", []):
-            final_actions.append({
-                "id": str(uuid.uuid4())[:8],
-                "assigned_to": item.get("assigned_to"),
-                "description": item.get("description"),
-                "status": "pending",
-                "sources": item.get("sources", [])
-            })
 
         transcript.append({
             "sender": "CEO AI",
@@ -275,174 +441,415 @@ class BoardroomService:
             "quality_flags": self._quality_flags(synthesis, source_ids),
             "timestamp": self._timestamp()
         })
-
         meeting.transcript = transcript
-        meeting.action_items = final_actions
-        meeting.status = "completed"
         self.db.commit()
 
-        log = ActivityLog(
-            tenant_id=self.tenant_id,
-            agent_name="CEO AI",
-            action="Boardroom Concluded",
-            description=f"Concluded evidence-backed boardroom session. Assigned {len(final_actions)} action items.",
-            status="success"
+        emit_event(
+            self.db,
+            meeting.id,
+            "synthesis.posted",
+            actor="CEO AI",
+            phase="synthesis",
+            payload={
+                "executive_summary": synthesis.get("executive_summary", "")[:200],
+                "confidence_score": synthesis.get("confidence_score"),
+                "recommended_action": synthesis.get("recommended_action", "")[:200],
+            }
         )
-        self.db.add(log)
+
+        # Phase: Governed Actions & Approval
+        transition(self.db, meeting, "approval")
+
+        raw_action_items = synthesis.get("action_items", [])
+        final_actions = []
+        action_records = []
+        conf_ratio = (confidence.get("score") or 0) / 100.0
+
+        for item in raw_action_items:
+            action_desc = item.get("description", "")
+            assigned = item.get("assigned_to", "Operations Expert")
+            action_type, risk_tier = classify_action(action_desc)
+            action_id = str(uuid.uuid4())[:8]
+            idempotency_key = f"{meeting.id}:{action_id}"
+
+            action_record = MeetingAction(
+                id=action_id,
+                meeting_id=meeting.id,
+                action_type=action_type,
+                assigned_to=assigned,
+                description=action_desc,
+                risk_tier=risk_tier,
+                idempotency_key=idempotency_key,
+                evidence_ids=item.get("sources", []),
+            )
+
+            # Governance gate
+            if risk_tier == "low":
+                action_record.status = "executing"
+                action_record.approved_by = "auto"
+                action_record.approved_at = datetime.datetime.now(datetime.timezone.utc)
+            elif risk_tier == "medium" and conf_ratio >= AUTO_APPROVE_CONFIDENCE_THRESHOLD:
+                action_record.status = "executing"
+                action_record.approved_by = "auto-confidence"
+                action_record.approved_at = datetime.datetime.now(datetime.timezone.utc)
+            else:
+                action_record.status = "awaiting_approval"
+
+            self.db.add(action_record)
+            action_records.append(action_record)
+
         self.db.commit()
 
-        await self.execute_action_items(meeting_id)
+        # Emit proposed events and execute auto-approved ones
+        any_awaiting = False
+        for action_record in action_records:
+            if action_record.status == "awaiting_approval":
+                any_awaiting = True
+                emit_event(
+                    self.db,
+                    meeting.id,
+                    "action.proposed",
+                    actor="CEO AI",
+                    phase="approval",
+                    payload={
+                        "action_id": action_record.id,
+                        "action_type": action_record.action_type,
+                        "assigned_to": action_record.assigned_to,
+                        "description": action_record.description,
+                        "risk_tier": action_record.risk_tier,
+                        "status": "awaiting_approval"
+                    }
+                )
+            elif action_record.status == "executing":
+                # Execute auto-approved
+                await self._execute_single_action(meeting, action_record)
 
-    async def execute_action_items(self, meeting_id: str):
-        meeting = self.db.query(AgentMeeting).filter(AgentMeeting.id == meeting_id).first()
-        if not meeting or not meeting.action_items:
-            return
+            final_actions.append({
+                "id": action_record.id,
+                "assigned_to": action_record.assigned_to,
+                "description": action_record.description,
+                "risk_tier": action_record.risk_tier,
+                "status": action_record.status,
+                "approved_by": action_record.approved_by,
+                "sources": action_record.evidence_ids or []
+            })
 
-        actions = list(meeting.action_items)
-        changed = False
+        meeting.action_items = final_actions
 
-        for idx, action in enumerate(actions):
-            action_id = action.get("id")
-            assigned = action.get("assigned_to", "")
-            desc = action.get("description", "").lower()
-            
-            # Mark as executing
-            action["status"] = "executing"
-            meeting.action_items = actions
+        if any_awaiting:
+            meeting.status = "awaiting_approval"
+            meeting.current_phase = "approval"
+            self.db.commit()
+            log = ActivityLog(
+                tenant_id=self.tenant_id,
+                agent_name="CEO AI",
+                action="Boardroom Awaiting Approval",
+                description=f"Boardroom session produced actions requiring human governance. {len(final_actions)} action items.",
+                status="pending"
+            )
+            self.db.add(log)
+            self.db.commit()
+        else:
+            transition(self.db, meeting, "execution")
+            transition(self.db, meeting, "completed")
+            meeting.status = "completed"
+            meeting.finished_at = datetime.datetime.now(datetime.timezone.utc)
+            self.db.commit()
+            emit_event(
+                self.db,
+                meeting.id,
+                "meeting.completed",
+                actor="system",
+                phase="completed",
+                payload={"total_actions": len(final_actions)}
+            )
+            log = ActivityLog(
+                tenant_id=self.tenant_id,
+                agent_name="CEO AI",
+                action="Boardroom Concluded",
+                description=f"Concluded evidence-backed boardroom session. Assigned {len(final_actions)} action items.",
+                status="success"
+            )
+            self.db.add(log)
             self.db.commit()
 
-            success = False
-            try:
-                # 1. Sales AI - Create Lead
-                if "sales" in assigned.lower() and ("lead" in desc or "create" in desc):
-                    # We create a Lead in the database
-                    # Try to extract company/email details from context
-                    customer_email = "lead@example.com"
-                    customer_phone = None
-                    customer_name = "Interested Prospect"
-                    company = "Unknown Corp"
+    async def _execute_single_action(self, meeting: AgentMeeting, action_record: MeetingAction) -> bool:
+        """Executes a single action record and logs output."""
+        assigned = (action_record.assigned_to or "").lower()
+        desc = (action_record.description or "").lower()
+        success = False
+        result_payload: dict = {}
 
-                    # Parse context_summary
-                    ctx_lines = (meeting.context_summary or "").split("\n")
-                    for line in ctx_lines:
-                        if line.startswith("Customer:"):
-                            contact = line.replace("Customer:", "").strip()
-                            if "@" in contact:
-                                customer_email = contact
-                            else:
-                                customer_phone = contact
-                                customer_email = f"{contact}@whatsapp.com"
-                        elif line.startswith("Subject:"):
-                            subj = line.replace("Subject:", "").strip()
-                            company_match = [w for w in subj.split() if w[0].isupper() and w not in ["New", "WhatsApp", "Email", "Lead", "Ticket"]]
-                            if company_match:
-                                company = company_match[0]
+        try:
+            # 1. Sales AI - Create Lead
+            if "sales" in assigned and ("lead" in desc or "create" in desc):
+                customer_email = "lead@example.com"
+                customer_phone = None
+                customer_name = "Interested Prospect"
+                company = "Unknown Corp"
 
-                    new_lead = Lead(
-                        tenant_id=self.tenant_id,
-                        name=customer_name,
-                        email=customer_email,
-                        phone=customer_phone,
-                        company=company,
-                        source=meeting.trigger_type,
-                        status="captured"
-                    )
-                    self.db.add(new_lead)
+                ctx_lines = (meeting.context_summary or "").split("\n")
+                for line in ctx_lines:
+                    if line.startswith("Customer:"):
+                        contact = line.replace("Customer:", "").strip()
+                        if "@" in contact:
+                            customer_email = contact
+                        else:
+                            customer_phone = contact
+                            customer_email = f"{contact}@whatsapp.com"
+                    elif line.startswith("Subject:"):
+                        subj = line.replace("Subject:", "").strip()
+                        company_match = [w for w in subj.split() if w[0].isupper() and w not in ["New", "WhatsApp", "Email", "Lead", "Ticket"]]
+                        if company_match:
+                            company = company_match[0]
+
+                new_lead = Lead(
+                    tenant_id=self.tenant_id,
+                    name=customer_name,
+                    email=customer_email,
+                    phone=customer_phone,
+                    company=company,
+                    source=meeting.trigger_type,
+                    status="captured"
+                )
+                self.db.add(new_lead)
+                self.db.commit()
+
+                log = ActivityLog(
+                    tenant_id=self.tenant_id,
+                    agent_name="Sales AI",
+                    action="Lead Captured",
+                    description=f"Autonomously created lead for '{customer_email}' from boardroom directive.",
+                    status="success"
+                )
+                self.db.add(log)
+                self.db.commit()
+                result_payload = {"lead_id": new_lead.id, "email": customer_email, "company": company}
+                success = True
+
+            # 2. Support AI - Notify Customer / Ticket Reply
+            elif "support" in assigned and ("notify" in desc or "send" in desc or "reply" in desc or "ticket" in desc):
+                if meeting.trigger_type == "support_ticket" and meeting.trigger_id:
+                    ticket_id = meeting.trigger_id
+                    ticket = self.db.query(Ticket).filter(Ticket.id == ticket_id).first()
+                    if ticket:
+                        reply_msg = (
+                            "Dear customer, thank you for reaching out. We have escalated your inquiry "
+                            "directly to our executive board. A meeting was held with our CEO, customer service team, "
+                            "and sales department to review your request. We have initiated a priority account file for you, "
+                            "and our Sales manager will follow up with you shortly to assist with next steps."
+                        )
+                        msg = TicketMessage(
+                            ticket_id=ticket.id,
+                            sender="agent",
+                            content=reply_msg
+                        )
+                        self.db.add(msg)
+                        self.db.commit()
+
+                        from app.services.agents.support import SupportAgent
+                        support_agent = SupportAgent(self.db, self.tenant_id)
+                        await support_agent.send_message(ticket.channel, ticket.customer_contact, reply_msg)
+                        result_payload = {"ticket_id": ticket.id, "sent_to": ticket.customer_contact}
+                        success = True
+                    else:
+                        success = True
+                        result_payload = {"note": "Ticket not found; customer notification recorded."}
+                else:
+                    success = True
+                    result_payload = {"note": "Customer notification directive recorded for manual outreach."}
+
+            # 3. HR AI - Update Candidate Status
+            elif "hr" in assigned and ("candidate" in desc or "offer" in desc or "status" in desc):
+                candidate = None
+                if meeting.trigger_id and meeting.trigger_type == "candidate_hiring":
+                    candidate = self.db.query(Candidate).filter(Candidate.id == meeting.trigger_id).first()
+                else:
+                    candidate = self.db.query(Candidate).filter(Candidate.tenant_id == self.tenant_id).order_by(Candidate.created_at.desc()).first()
+
+                if candidate:
+                    candidate.status = "offered"
                     self.db.commit()
-                    
-                    from app.models.agents import ActivityLog
+
                     log = ActivityLog(
                         tenant_id=self.tenant_id,
-                        agent_name="Sales AI",
-                        action="Lead Captured",
-                        description=f"Autonomously created lead for '{customer_email}' from boardroom directive.",
+                        agent_name="HR AI",
+                        action="Candidate Promoted",
+                        description=f"Autonomously updated candidate '{candidate.name}' status to 'offered' following budget approval.",
                         status="success"
                     )
                     self.db.add(log)
                     self.db.commit()
+                    result_payload = {"candidate_id": candidate.id, "new_status": "offered"}
+                    success = True
+                else:
                     success = True
 
-                # 2. Support AI - Notify Customer / Ticket Reply
-                elif "support" in assigned.lower() and ("notify" in desc or "send" in desc or "reply" in desc or "ticket" in desc):
-                    if meeting.trigger_type == "support_ticket" and meeting.trigger_id:
-                        ticket_id = meeting.trigger_id
-                        ticket = self.db.query(Ticket).filter(Ticket.id == ticket_id).first()
-                        if ticket:
-                            reply_msg = (
-                                "Dear customer, thank you for reaching out. We have escalated your inquiry "
-                                "directly to our executive board. A meeting was held with our CEO, customer service team, "
-                                "and sales department to review your request. We have initiated a priority account file for you, "
-                                "and our Sales manager will follow up with you shortly to assist with next steps."
-                            )
-                            # Add TicketMessage
-                            msg = TicketMessage(
-                                ticket_id=ticket.id,
-                                sender="agent",
-                                content=reply_msg
-                            )
-                            self.db.add(msg)
-                            self.db.commit()
-
-                            # Send actual message
-                            from app.services.agents.support import SupportAgent
-                            support_agent = SupportAgent(self.db, self.tenant_id)
-                            await support_agent.send_message(ticket.channel, ticket.customer_contact, reply_msg)
-                            success = True
-
-                # 3. HR AI - Update Candidate Status
-                elif "hr" in assigned.lower() and ("candidate" in desc or "offer" in desc or "status" in desc):
-                    # Find candidate in DB and promote
-                    candidate = None
-                    if meeting.trigger_id and meeting.trigger_type == "candidate_hiring":
-                        candidate = self.db.query(Candidate).filter(Candidate.id == meeting.trigger_id).first()
-                    else:
-                        # find last candidate
-                        candidate = self.db.query(Candidate).filter(Candidate.tenant_id == self.tenant_id).order_by(Candidate.created_at.desc()).first()
-
-                    if candidate:
-                        candidate.status = "offered"
-                        self.db.commit()
-                        
-                        from app.models.agents import ActivityLog
-                        log = ActivityLog(
-                            tenant_id=self.tenant_id,
-                            agent_name="HR AI",
-                            action="Candidate Promoted",
-                            description=f"Autonomously updated candidate '{candidate.name}' status to 'offered' following budget approval.",
-                            status="success"
-                        )
-                        self.db.add(log)
-                        self.db.commit()
-                        success = True
-                    else:
-                        success = True # no candidate found
-
-                # 4. Fallback/Default for other tasks (Finance, Marketing, etc.)
-                else:
-                    log = ActivityLog(
-                        tenant_id=self.tenant_id,
-                        agent_name=assigned,
-                        action="Task Requires Tooling",
-                        description=f"Boardroom directive recorded but no executable integration is connected for: '{action.get('description')}'",
-                        status="pending"
-                    )
-                    self.db.add(log)
-                    self.db.commit()
-                    success = None
-
-            except Exception as ex:
-                print(f"Error executing action item: {ex}")
-                success = False
-
-            if success is True:
-                action["status"] = "completed"
-            elif success is None:
-                action["status"] = "pending"
             else:
-                action["status"] = "failed"
-            actions[idx] = action
-            meeting.action_items = actions
+                log = ActivityLog(
+                    tenant_id=self.tenant_id,
+                    agent_name=action_record.assigned_to,
+                    action="Task Recorded",
+                    description=f"Boardroom directive recorded for: '{action_record.description}'",
+                    status="pending"
+                )
+                self.db.add(log)
+                self.db.commit()
+                result_payload = {"note": "Task recorded for manual execution"}
+                success = True
+
+        except Exception as ex:
+            logger.error("Error executing boardroom action: %s", ex)
+            success = False
+            result_payload = {"error": str(ex)}
+
+        action_record.status = "completed" if success else "failed"
+        action_record.result = result_payload
+        self.db.add(action_record)
+        self.db.commit()
+
+        # Update JSON action_items on meeting for backward compatibility
+        actions_list = list(meeting.action_items or [])
+        for act in actions_list:
+            if act.get("id") == action_record.id:
+                act["status"] = action_record.status
+                act["approved_by"] = action_record.approved_by
+        meeting.action_items = actions_list
+        self.db.commit()
+
+        emit_event(
+            self.db,
+            meeting.id,
+            "action.executed",
+            actor=action_record.assigned_to,
+            phase=meeting.current_phase,
+            payload={
+                "action_id": action_record.id,
+                "status": action_record.status,
+                "result": result_payload
+            }
+        )
+        return success
+
+    async def approve_action(self, action_id: str, approved_by: str = "user") -> MeetingAction:
+        """Approve and execute a governed boardroom action."""
+        action = self.db.query(MeetingAction).filter(MeetingAction.id == action_id).first()
+        if not action:
+            raise ValueError(f"Meeting action {action_id} not found")
+        if action.status not in ("awaiting_approval", "pending"):
+            return action
+
+        meeting = self.db.query(AgentMeeting).filter(AgentMeeting.id == action.meeting_id).first()
+        action.status = "executing"
+        action.approved_by = approved_by
+        action.approved_at = datetime.datetime.now(datetime.timezone.utc)
+        self.db.add(action)
+        self.db.commit()
+
+        emit_event(
+            self.db,
+            action.meeting_id,
+            "action.approved",
+            actor=approved_by,
+            phase="approval",
+            payload={"action_id": action.id, "approved_by": approved_by}
+        )
+
+        if meeting:
+            await self._execute_single_action(meeting, action)
+            self._check_and_finalize_meeting(meeting)
+
+        return action
+
+    def reject_action(self, action_id: str, rejected_by: str = "user", reason: Optional[str] = None) -> MeetingAction:
+        """Reject a proposed boardroom action."""
+        action = self.db.query(MeetingAction).filter(MeetingAction.id == action_id).first()
+        if not action:
+            raise ValueError(f"Meeting action {action_id} not found")
+
+        action.status = "rejected"
+        action.rejected_by = rejected_by
+        action.rejected_at = datetime.datetime.now(datetime.timezone.utc)
+        action.rejection_reason = reason
+        self.db.add(action)
+        self.db.commit()
+
+        # Update JSON action_items on meeting
+        meeting = self.db.query(AgentMeeting).filter(AgentMeeting.id == action.meeting_id).first()
+        if meeting:
+            actions_list = list(meeting.action_items or [])
+            for act in actions_list:
+                if act.get("id") == action.id:
+                    act["status"] = "rejected"
+            meeting.action_items = actions_list
             self.db.commit()
+
+        emit_event(
+            self.db,
+            action.meeting_id,
+            "action.rejected",
+            actor=rejected_by,
+            phase="approval",
+            payload={"action_id": action.id, "rejected_by": rejected_by, "reason": reason}
+        )
+
+        if meeting:
+            self._check_and_finalize_meeting(meeting)
+
+        return action
+
+    def _check_and_finalize_meeting(self, meeting: AgentMeeting):
+        """Check if all actions are completed/rejected and transition to completed if so."""
+        pending_count = self.db.query(MeetingAction).filter(
+            MeetingAction.meeting_id == meeting.id,
+            MeetingAction.status.in_(["pending", "awaiting_approval", "executing"])
+        ).count()
+
+        if pending_count == 0:
+            meeting.status = "completed"
+            meeting.finished_at = datetime.datetime.now(datetime.timezone.utc)
+            transition(self.db, meeting, "completed")
+            emit_event(
+                self.db,
+                meeting.id,
+                "meeting.completed",
+                actor="system",
+                phase="completed",
+                payload={"meeting_id": meeting.id}
+            )
+
+    def cancel_meeting(self, meeting_id: str, cancelled_by: str = "user", reason: Optional[str] = None) -> Optional[AgentMeeting]:
+        """Cancel an ongoing or awaiting boardroom meeting."""
+        meeting = self.db.query(AgentMeeting).filter(AgentMeeting.id == meeting_id).first()
+        if not meeting:
+            return None
+
+        meeting.status = "cancelled"
+        meeting.failure_reason = reason or "Meeting cancelled by user"
+        meeting.finished_at = datetime.datetime.now(datetime.timezone.utc)
+        transition(self.db, meeting, "cancelled")
+        emit_event(
+            self.db,
+            meeting.id,
+            "meeting.cancelled",
+            actor=cancelled_by,
+            phase="cancelled",
+            payload={"reason": reason or "Cancelled by user"}
+        )
+        return meeting
+
+    async def execute_action_items(self, meeting_id: str):
+        """Legacy compatibility wrapper."""
+        actions = self.db.query(MeetingAction).filter(
+            MeetingAction.meeting_id == meeting_id,
+            MeetingAction.status == "pending"
+        ).all()
+        meeting = self.db.query(AgentMeeting).filter(AgentMeeting.id == meeting_id).first()
+        if not meeting:
+            return
+        for act in actions:
+            if act.risk_tier == "low":
+                await self._execute_single_action(meeting, act)
 
     def _collect_evidence_pack(self, meeting: AgentMeeting) -> dict:
         sources = [{
@@ -599,9 +1006,20 @@ class BoardroomService:
             }
         return parsed
 
-    async def _safe_complete(self, prompt: str, system_prompt: str) -> str:
+    async def _safe_complete(
+        self,
+        prompt: str,
+        system_prompt: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> str:
         try:
-            return await self.llm.complete(prompt=prompt, system_prompt=system_prompt, provider="gemini")
+            return await self.llm.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                provider=provider or self._provider or "gemini",
+                model=model or self._model,
+            )
         except Exception as exc:
             return json.dumps({
                 "findings": [f"LLM call failed: {exc}"],

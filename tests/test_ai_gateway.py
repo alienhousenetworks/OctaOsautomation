@@ -151,3 +151,110 @@ async def test_llm_gateway_knowledge_injection(mock_execute_cached):
     assert "You are a creative writer." in kwargs["system_prompt"]
     assert "Always use brand colors." in kwargs["system_prompt"]
     assert "Standard Operating Procedure" in kwargs["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_adapter_execution():
+    from app.services.ai_gateway.adapters import OpenRouterAdapter
+    from unittest.mock import AsyncMock, MagicMock
+    import httpx
+
+    adapter = OpenRouterAdapter(api_key="sk-or-v1-testkey123456789")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"content": "Hello from OpenRouter"}}],
+        "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "prompt_tokens_details": {"cached_tokens": 4}
+        }
+    }
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_resp):
+        res = await adapter.execute_request("Hi", "google/gemini-2.5-flash", system_prompt="You are helpful")
+        assert res["content"] == "Hello from OpenRouter"
+        assert res["input_tokens"] == 12
+        assert res["output_tokens"] == 8
+        assert res["cached_tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_together_adapter_execution():
+    from app.services.ai_gateway.adapters import TogetherAdapter
+    from unittest.mock import AsyncMock, MagicMock
+
+    adapter = TogetherAdapter(api_key="together-test-key-12345678")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"content": "Hello from Together AI"}}],
+        "usage": {
+            "prompt_tokens": 20,
+            "completion_tokens": 15
+        }
+    }
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_resp):
+        res = await adapter.execute_request("Hi", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
+        assert res["content"] == "Hello from Together AI"
+        assert res["input_tokens"] == 20
+        assert res["output_tokens"] == 15
+
+
+def test_get_provider_models_dynamic_env():
+    from app.services.ai_gateway.routing import get_provider_models
+    from app.core.config import settings
+
+    original_or_models = settings.OPENROUTER_MODELS
+    settings.OPENROUTER_MODELS = "custom/test-model-1,custom/test-model-2"
+    try:
+        models = get_provider_models("openrouter")
+        model_names = [m["model"] for m in models]
+        assert "google/gemini-2.5-flash" in model_names
+        assert "custom/test-model-1" in model_names
+        assert "custom/test-model-2" in model_names
+    finally:
+        settings.OPENROUTER_MODELS = original_or_models
+
+
+def test_inbuilt_vs_byok_mode():
+    from app.services.ai_gateway.gateway import AIProviderGateway
+    from app.models.base import APICredential
+    from unittest.mock import MagicMock
+    from app.core.config import settings
+
+    db = MagicMock(spec=Session)
+    gateway = AIProviderGateway()
+
+    # 1. Test Inbuilt mode returns server env key
+    original_or_key = settings.OPENROUTER_API_KEY
+    settings.OPENROUTER_API_KEY = "server-openrouter-key"
+    try:
+        # Mock mode as inbuilt
+        db.query.return_value.filter.return_value.first.return_value = None
+        key = gateway._get_api_key(db, tenant_id="tenant-abc", provider="openrouter")
+        assert key == "server-openrouter-key"
+
+        # 2. Test BYOK mode returns tenant key
+        mock_ai_mode = MagicMock(provider="ai_mode", settings={"mode": "byok"})
+        mock_cred = MagicMock(provider="openrouter", encrypted_key="mock_enc")
+        
+        def mock_query_filter(*args, **kwargs):
+            m = MagicMock()
+            # If query is for ai_mode
+            def mock_first():
+                return mock_ai_mode
+            m.first = mock_first
+            return m
+
+        with patch("app.services.ai_gateway.gateway.decrypt_api_key", return_value="decrypted-user-key"):
+            db.query.return_value.filter.side_effect = [
+                MagicMock(first=lambda: mock_ai_mode),
+                MagicMock(first=lambda: mock_cred)
+            ]
+            key_byok = gateway._get_api_key(db, tenant_id="tenant-abc", provider="openrouter")
+            assert key_byok == "decrypted-user-key"
+    finally:
+        settings.OPENROUTER_API_KEY = original_or_key
+

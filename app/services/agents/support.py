@@ -59,6 +59,8 @@ class SupportAgent(BaseAgent):
                 return cred.settings.get("whatsapp_auto_reply", True)
             elif channel == "email":
                 return cred.settings.get("email_auto_reply", True)
+            elif channel in ("widget", "chat"):
+                return cred.settings.get("widget_auto_reply", True)
         return True # Default to True
 
     def validate_credentials(self, channel: str):
@@ -156,8 +158,8 @@ class SupportAgent(BaseAgent):
         if self.is_auto_reply_enabled(channel):
             # WhatsApp ~4–5 min; Email ~20 min (product SLA)
             delay_seconds = 270 if channel == "whatsapp" else 1200 if channel == "email" else 180
-            if ticket.status == "human_handling":
-                self.log_activity("Auto-Reply Skipped", f"Ticket #{ticket.id[:8]} under human takeover.")
+            if ticket.status in ("human_handling", "pending_human"):
+                self.log_activity("Auto-Reply Skipped", f"Ticket #{ticket.id[:8]} under human takeover or pending queue.")
             else:
                 celery_app.send_task(
                     "auto_reply_task",

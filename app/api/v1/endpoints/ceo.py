@@ -10,8 +10,11 @@ from app.models.base import User
 from app.models.workflows import Workflow, WorkflowTask
 from app.services.agents.ceo import CEOService
 from app.core.celery_app import celery_app
+from app.api.v1.endpoints.ceo_v5 import router as ceo_v5_router
 
 router = APIRouter()
+router.include_router(ceo_v5_router, prefix="", tags=["ceo-v5"])
+router.include_router(ceo_v5_router, prefix="/v5", tags=["ceo-v5"])
 
 class ObjectiveRequest(BaseModel):
     prompt: str

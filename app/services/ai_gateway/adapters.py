@@ -56,10 +56,23 @@ class OpenAIAdapter(BaseProviderAdapter):
         return True
 
     async def execute_request(self, prompt: str, model: str, system_prompt: str = None, **kwargs) -> Dict[str, Any]:
+        images = kwargs.pop("images", None)
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+
+        if images:
+            user_content = [{"type": "text", "text": prompt}]
+            for img in images:
+                mime = img.get("mime_type", "image/png")
+                b64 = img.get("data", "")
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"}
+                })
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         # Allow extra parameters like temperature
         payload = {
@@ -219,7 +232,22 @@ class AnthropicAdapter(BaseProviderAdapter):
         return True
 
     async def execute_request(self, prompt: str, model: str, system_prompt: str = None, **kwargs) -> Dict[str, Any]:
-        messages = [{"role": "user", "content": prompt}]
+        images = kwargs.pop("images", None)
+        if images:
+            user_content = [{"type": "text", "text": prompt}]
+            for img in images:
+                user_content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.get("mime_type", "image/png"),
+                        "data": img.get("data", "")
+                    }
+                })
+            messages = [{"role": "user", "content": user_content}]
+        else:
+            messages = [{"role": "user", "content": prompt}]
+
         payload = {
             "model": model,
             "max_tokens": kwargs.get("max_tokens", 1024),
@@ -429,9 +457,21 @@ class GeminiAdapter(BaseProviderAdapter):
         return False # No native batch API in Gemini SDK at beta endpoint
 
     async def execute_request(self, prompt: str, model: str, system_prompt: str = None, **kwargs) -> Dict[str, Any]:
+        images = kwargs.pop("images", None)
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
+        
+        parts: List[Dict[str, Any]] = [{"text": prompt}]
+        if images:
+            for img in images:
+                parts.append({
+                    "inline_data": {
+                        "mime_type": img.get("mime_type", "image/png"),
+                        "data": img.get("data", "")
+                    }
+                })
+
         payload = {
-            "contents": [{"parts": [{"text": prompt}]}]
+            "contents": [{"parts": parts}]
         }
         if system_prompt:
             payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
@@ -467,6 +507,131 @@ class GeminiAdapter(BaseProviderAdapter):
             }
 
 
+class OpenRouterAdapter(BaseProviderAdapter):
+    def supports_native_caching(self, model: str) -> bool:
+        # OpenRouter automatically routes prompt caching for models that support it
+        return True
+
+    async def execute_request(self, prompt: str, model: str, system_prompt: str = None, **kwargs) -> Dict[str, Any]:
+        images = kwargs.pop("images", None)
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        if images:
+            user_content = [{"type": "text", "text": prompt}]
+            for img in images:
+                mime = img.get("mime_type", "image/png")
+                b64 = img.get("data", "")
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"}
+                })
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            **kwargs
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://octaos.ai",
+            "X-Title": "OctaOS",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=45.0
+            )
+            if response.status_code != 200:
+                try:
+                    err_json = response.json()
+                    err_msg = err_json.get("error", {}).get("message") or err_json.get("message") or response.text
+                except Exception:
+                    err_msg = response.text
+                raise Exception(f"OpenRouter API error (status {response.status_code}): {err_msg}")
+
+            data = response.json()
+            choices = data.get("choices", [])
+            if not choices:
+                raise Exception(f"OpenRouter API returned no choices: {data}")
+            content = choices[0].get("message", {}).get("content", "")
+            usage = data.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            cached_tokens = (
+                usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                or usage.get("cache_discount", 0)
+            )
+
+            return {
+                "content": content,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cached_tokens": cached_tokens,
+                "raw_response": data
+            }
+
+
+class TogetherAdapter(BaseProviderAdapter):
+    async def execute_request(self, prompt: str, model: str, system_prompt: str = None, **kwargs) -> Dict[str, Any]:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            **kwargs
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.together.xyz/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=45.0
+            )
+            if response.status_code != 200:
+                try:
+                    err_json = response.json()
+                    err_msg = err_json.get("error", {}).get("message") or err_json.get("message") or response.text
+                except Exception:
+                    err_msg = response.text
+                raise Exception(f"Together AI API error (status {response.status_code}): {err_msg}")
+
+            data = response.json()
+            choices = data.get("choices", [])
+            if not choices:
+                raise Exception(f"Together AI API returned no choices: {data}")
+            content = choices[0].get("message", {}).get("content", "")
+            usage = data.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+
+            return {
+                "content": content,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cached_tokens": 0,
+                "raw_response": data
+            }
+
+
 class GrokAdapter(BaseProviderAdapter):
     async def execute_request(self, prompt: str, model: str, system_prompt: str = None, **kwargs) -> Dict[str, Any]:
         messages = []
@@ -488,13 +653,21 @@ class GrokAdapter(BaseProviderAdapter):
                     "Content-Type": "application/json",
                 },
                 json=payload,
-                timeout=30.0
+                timeout=45.0
             )
             if response.status_code != 200:
-                raise Exception(f"Grok API error: {response.text}")
+                try:
+                    err_json = response.json()
+                    err_msg = err_json.get("error", {}).get("message") or err_json.get("message") or response.text
+                except Exception:
+                    err_msg = response.text
+                raise Exception(f"Grok API error (status {response.status_code}): {err_msg}")
 
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            choices = data.get("choices", [])
+            if not choices:
+                raise Exception(f"Grok API returned no choices: {data}")
+            content = choices[0].get("message", {}).get("content", "")
             usage = data.get("usage", {})
             input_tokens = usage.get("prompt_tokens", 0)
             output_tokens = usage.get("completion_tokens", 0)

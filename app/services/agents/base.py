@@ -27,16 +27,24 @@ class BaseAgent:
         self.db.commit()
 
     def get_knowledge_context(self, task_type: str = "general_task", department: str = None) -> str:
-        # Existing Knowledge Document approach
+        from app.services.rag.hybrid_engine import HybridRAGEngine
+
+        # 1. Pinned Directives & Brand Guidelines (Always included)
         query = self.db.query(KnowledgeDocument).filter(
-            KnowledgeDocument.tenant_id == self.tenant_id
+            KnowledgeDocument.tenant_id == self.tenant_id,
+            KnowledgeDocument.is_active == True,
+            KnowledgeDocument.doc_type.in_(["Prompt Directives", "Brand Guidelines"])
         )
         if department:
             query = query.filter(KnowledgeDocument.department.in_([department, "General"]))
-        docs = query.all()
+        pinned_docs = query.all()
+
+        # 2. Targeted semantic retrieval for the specific task
+        rag_engine = HybridRAGEngine(self.db, self.tenant_id)
+        rag_hits = rag_engine.retrieve(task_type, department=department or self.department, top_k=4)
 
         # Augment with Global Rules from Memory Layer
-        global_rules = self.memory.get_global_rules(category=department)
+        global_rules = self.memory.get_global_rules(category=department or self.department)
         
         context = (
             "Company Guidelines & Knowledge Base:\n"
@@ -45,8 +53,13 @@ class BaseAgent:
             "into your generated output (social posts, emails, replies, etc.) whenever relevant.\n\n"
         )
         
-        for doc in docs:
+        for doc in pinned_docs:
             context += f"- [{doc.doc_type}]: {doc.content}\n"
+
+        if rag_hits:
+            context += "\nRelevant Knowledge Base Extracts:\n"
+            for h in rag_hits:
+                context += f"- {h['citation']}: {h['content']}\n"
             
         context += "\nLearned Rules (Highest Priority):\n"
         for rule in global_rules:

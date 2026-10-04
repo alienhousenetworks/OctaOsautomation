@@ -167,10 +167,19 @@ class Ticket(Base):
     organization_id = Column(String, nullable=True, index=True)
     subject = Column(String)
     description = Column(Text)
-    status = Column(String, default="open")
+    status = Column(String, default="open") # open, pending_human, human_handling, resolved, closed
     priority = Column(String, default="medium")
-    channel = Column(String) # email, whatsapp, chat
+    channel = Column(String) # email, whatsapp, chat, widget
     customer_contact = Column(String, nullable=True) # email address or whatsapp number
+    customer_name = Column(String, nullable=True)
+    customer_email = Column(String, nullable=True)
+    customer_phone = Column(String, nullable=True)
+    claimed_by = Column(String, nullable=True) # user_id of claiming agent
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    session_id = Column(String, nullable=True, index=True)
+    mode = Column(String, default="ai") # ai, human
+    extra_data = Column(JSON, default=dict)
     approval_status = Column(String, default="pending")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -180,11 +189,20 @@ class TicketMessage(Base):
     __tablename__ = "ticket_messages"
     id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     ticket_id = Column(String, ForeignKey("tickets.id"), nullable=False)
-    sender = Column(String) # "customer" or "agent"
+    sender = Column(String) # "customer", "agent", or "system"
     content = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     ticket = relationship("Ticket", back_populates="messages")
+
+class SupportAgentPresence(Base):
+    __tablename__ = "support_agent_presences"
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    user_name = Column(String, nullable=True)
+    is_online = Column(Boolean, default=True)
+    last_heartbeat = Column(DateTime(timezone=True), server_default=func.now())
 
 class AgentMeeting(Base):
     __tablename__ = "agent_meetings"
@@ -192,13 +210,21 @@ class AgentMeeting(Base):
     tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False)
     organization_id = Column(String, nullable=True, index=True)
     title = Column(String, nullable=False)
-    status = Column(String, default="active") # active, completed
+    status = Column(String, default="active")
+    # active | awaiting_approval | completed | failed | cancelled
+    current_phase = Column(String, nullable=True)
+    # assembly | evidence | analysis | critique | synthesis | approval | execution | completed
     trigger_type = Column(String) # support_ticket, transaction_anomaly, candidate_hiring, manual
     trigger_id = Column(String, nullable=True) # ID of ticket, lead, candidate, etc.
     context_summary = Column(Text, nullable=True)
     participants = Column(JSON, nullable=False) # list of agent names e.g., ["Support AI", "Sales AI", "CEO AI"]
-    transcript = Column(JSON, default=[]) # list of message objects
-    action_items = Column(JSON, default=[]) # list of action item objects
+    transcript = Column(JSON, default=[]) # kept for backward compat; superseded by meeting_events
+    action_items = Column(JSON, default=[]) # kept for backward compat; superseded by meeting_actions
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    total_tokens = Column(Integer, default=0)
+    total_cost_usd = Column(Float, default=0.0)
+    failure_reason = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class BusinessProfile(Base):

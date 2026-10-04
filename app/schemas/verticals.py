@@ -145,6 +145,12 @@ class AgentMeeting(AgentMeetingBase):
     id: str
     tenant_id: str
     status: str
+    current_phase: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    total_tokens: Optional[int] = 0
+    total_cost_usd: Optional[float] = 0.0
+    failure_reason: Optional[str] = None
     context_summary: Optional[str] = None
     transcript: List[dict] = []
     action_items: List[dict] = []

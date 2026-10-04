@@ -235,9 +235,17 @@ Return a JSON with exactly one key: 'primary_source' (string) containing your ch
                         except Exception:
                             pass
                 
-                # Final Strict Validation
+                # Final Strict Validation and Suppression Check
                 has_name = bool(c.get("name") and c["name"].strip() not in ["Unknown Contact", "Manager", "General Inquiry"])
                 has_contact = bool(c.get("email") and "@" in c["email"] and not c["email"].startswith("contact@") and not c["email"].startswith("info@"))
+                
+                from app.services.sales_os.governance.suppression import SuppressionService
+                suppression_service = SuppressionService(self.db, self.tenant_id)
+                domain_val = c.get("website", "").replace("https://", "").replace("http://", "").split("/")[0]
+                is_suppressed, supp_reason = suppression_service.is_suppressed(email=c.get("email"), domain=domain_val, phone=c.get("phone"))
+                
+                if is_suppressed:
+                    continue
                 
                 if has_name and has_contact:
                     companies.append({
@@ -281,28 +289,22 @@ Estimated Revenue: {c['estimated_revenue']}
 Estimated Employees: {c['estimated_employees']}
 Our Target Budget Range: {profile.target_budget_range}
 
-Assess their purchasing capacity. Choose one of: "20K–1L", "1L–3L", "3L–7L", "7L–15L", "15L+".
-Determine if they qualify for our offer. You MUST be extremely lenient. Default to qualified=true unless they are a severe mismatch.
+Assess their purchasing capacity based on their estimated revenue and employee count. Choose one of: "20K–1L", "1L–3L", "3L–7L", "7L–15L", "15L+".
+Determine if they genuinely qualify for our target offer and budget range. Do NOT fabricate qualification if there is an explicit mismatch or insufficient evidence.
 Output a JSON object with:
 - capacity: string (one of the options above)
-- qualified: boolean
-- reason: string
+- qualified: boolean (true if budget, industry and size align with ICP, false otherwise)
+- reason: string (concise, factual explanation grounded in provided data)
 Only return JSON, no other text."""
                 try:
                     qual_str = await self.llm.complete(prompt, provider=provider, model=model)
                     qual = extract_json(qual_str)
                 except Exception:
-                    qual = {"capacity": "1L–3L", "qualified": True, "reason": "Default qualification applied."}
+                    qual = {"capacity": "Unknown", "qualified": False, "reason": "Insufficient evidence to qualify company budget."}
                 
-                c["purchasing_capacity"] = qual.get("capacity", "1L–3L")
-                
-                # Force at least 50% qualification to keep pipeline healthy
-                if i < max(1, len(companies) // 2):
-                    c["qualified"] = True
-                else:
-                    c["qualified"] = qual.get("qualified", True)
-                    
-                c["qualification_reason"] = qual.get("reason", "Budget range matches organization size.")
+                c["purchasing_capacity"] = qual.get("capacity", "Unknown")
+                c["qualified"] = bool(qual.get("qualified", False))
+                c["qualification_reason"] = qual.get("reason", "Qualification evaluated against target budget and ICP parameters.")
                 if c["qualified"]:
                     qualified_companies.append(c)
             update_status(3, "completed", f"Qualified {len(qualified_companies)} / {len(companies)} companies.", f"Lead qualification complete. Rejected {len(companies) - len(qualified_companies)} companies outside budget.")
@@ -498,6 +500,12 @@ Keep it short, clear, professional and under 150 words. No subject line, no plac
                 subject = f"Partnership Opportunity - {profile.company_name} x {c['company_name']}"
                 body = c["outreach_message"]
                 
+                # Pre-send socket suppression check
+                is_supp, supp_reason = suppression_service.is_suppressed(email=c["contact"]["email"], phone=c["contact"].get("phone"))
+                if is_supp:
+                    self.log_activity("Outreach Skipped", f"Contact {c['contact']['email']} is suppressed: {supp_reason}", "pending")
+                    continue
+
                 sent_successfully = False
                 smtp_cred = self.db.query(APICredential).filter_by(tenant_id=self.tenant_id, provider="smtp").first()
                 if smtp_cred and smtp_cred.encrypted_key and "your_api_key" not in smtp_cred.encrypted_key:

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import {
   Activity, Users, DollarSign, BarChart3, Briefcase, Zap, BookOpen,
   LogOut, Calendar, MessageSquare, Clock, TrendingUp, Target, FileText, Key, Video,
-  Menu, X, ChevronRight, Settings2, UserCircle, Shield
+  Menu, X, ChevronRight, Settings2, UserCircle, Shield, ChevronDown, Sparkles, CheckCircle2
 } from 'lucide-react';
 
 import KnowledgeView from '@/components/views/knowledge-view';
@@ -141,6 +141,11 @@ export default function Home() {
   const [keyValue, setKeyValue] = useState('');
   const [isKeyDialogOpen, setIsKeyDialogOpen] = useState(false);
 
+  // AI Mode State ('inbuilt' vs 'byok')
+  const [aiMode, setAiMode] = useState<'inbuilt' | 'byok'>('inbuilt');
+  const [isAiModeDialogOpen, setIsAiModeDialogOpen] = useState(false);
+  const [modeLoading, setModeLoading] = useState(false);
+
   // App Dashboard States
   const [activeView, setActiveView] = useState('dashboard');
   const [queue, setQueue] = useState<{ posts: any[], leads: any[] }>({ posts: [], leads: [] });
@@ -207,7 +212,7 @@ export default function Home() {
     }
   }, []);
 
-  const fetchWithAuth = async (url: string, options: any = {}) => {
+  const fetchWithAuth = useCallback(async (url: string, options: any = {}) => {
     // Prefer live token from storage (after refresh) over React state
     const active = getAccessToken() || token;
     const res = await fetchWithSession(url, options, API_URL);
@@ -221,7 +226,7 @@ export default function Home() {
       handleLogout();
     }
     return res;
-  };
+  }, [token, API_URL]);
 
   const safeJson = async (res: Response, fallback: any = null) => {
     if (!res.ok) return fallback;
@@ -259,14 +264,15 @@ export default function Home() {
         }
       }
 
-      const [qRes, tRes, kRes, mRes, tmRes, aRes, keyStatusRes] = await Promise.all([
+      const [qRes, tRes, kRes, mRes, tmRes, aRes, keyStatusRes, modeRes] = await Promise.all([
         fetchWithAuth(`${API_URL}/commands/queue`),
         fetchWithAuth(`${API_URL}/commands/timeline`),
         fetchWithAuth(`${API_URL}/commands/knowledge`),
         fetchWithAuth(`${API_URL}/dashboard/metrics`),
         fetchWithAuth(`${API_URL}/dashboard/teams`),
         fetchWithAuth(`${API_URL}/dashboard/marketplace/installed`),
-        fetchWithAuth(`${API_URL}/commands/keys`)
+        fetchWithAuth(`${API_URL}/commands/keys`),
+        fetchWithAuth(`${API_URL}/commands/ai-mode`)
       ]);
       // Guard against error JSON objects (fixes t.slice is not a function crashes)
       setQueue(await safeJson(qRes, []));
@@ -278,8 +284,37 @@ export default function Home() {
 
       const keyStatusData = await safeJson(keyStatusRes, {});
       setConfiguredProviders(keyStatusData.configured_providers || []);
+
+      const modeData = await safeJson(modeRes, {});
+      if (modeData.mode) setAiMode(modeData.mode);
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const handleToggleAiMode = async (newMode: 'inbuilt' | 'byok') => {
+    if (newMode === aiMode) {
+      setIsAiModeDialogOpen(false);
+      return;
+    }
+    if (modeLoading) return;
+    setModeLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/commands/ai-mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: newMode }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAiMode(data.mode);
+        setIsAiModeDialogOpen(false);
+        fetchData();
+      }
+    } catch (e) {
+      console.error('Failed to update AI mode:', e);
+    } finally {
+      setModeLoading(false);
     }
   };
 
@@ -567,6 +602,106 @@ export default function Home() {
 
           {/* Right: Actions */}
           <div className="flex items-center gap-2.5">
+            {/* AI Mode Selector Button */}
+            <button
+              onClick={() => setIsAiModeDialogOpen(true)}
+              id="header-ai-mode-btn"
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+                aiMode === 'inbuilt'
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 shadow-sm shadow-emerald-500/10'
+                  : 'bg-violet-500/10 border-violet-500/30 text-violet-300 hover:bg-violet-500/20 shadow-sm shadow-violet-500/10'
+              }`}
+              title="Click to switch between Inbuilt Platform AI and BYOK Mode"
+            >
+              <span className={`h-2 w-2 rounded-full ${aiMode === 'inbuilt' ? 'bg-emerald-400' : 'bg-violet-400'} animate-pulse`} />
+              <span className="font-extrabold uppercase tracking-wide">
+                {aiMode === 'inbuilt' ? 'Inbuilt AI' : 'BYOK Mode'}
+              </span>
+              <ChevronDown size={12} className="opacity-70" />
+            </button>
+
+            {/* AI Mode Switcher Dialog */}
+            <Dialog open={isAiModeDialogOpen} onOpenChange={setIsAiModeDialogOpen}>
+              <DialogContent className="glass-panel border-violet-500/20 text-white rounded-3xl max-w-lg">
+                <DialogHeader>
+                  <DialogTitle className="text-white font-extrabold text-xl flex items-center gap-2">
+                    <Sparkles className="text-violet-400" /> Choose AI Execution Mode
+                  </DialogTitle>
+                </DialogHeader>
+
+                <div className="space-y-4 py-3">
+                  <p className="text-xs text-gray-400">
+                    Select how autonomous agents and workflows route their LLM completions across your workspace.
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* Inbuilt AI Card */}
+                    <button
+                      type="button"
+                      onClick={() => handleToggleAiMode('inbuilt')}
+                      disabled={modeLoading}
+                      className={`p-4 rounded-2xl border text-left flex flex-col justify-between transition-all ${
+                        aiMode === 'inbuilt'
+                          ? 'bg-emerald-500/15 border-emerald-500 text-white shadow-lg shadow-emerald-500/10'
+                          : 'bg-gray-900/60 border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+                      }`}
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                            Recommended
+                          </span>
+                          {aiMode === 'inbuilt' && <CheckCircle2 size={16} className="text-emerald-400" />}
+                        </div>
+                        <h4 className="text-base font-extrabold text-white">Inbuilt Platform AI</h4>
+                        <p className="text-[11px] text-gray-300 leading-relaxed">
+                          Zero setup required. Requests automatically route through high-availability system keys with intelligent multi-provider failover.
+                        </p>
+                      </div>
+                      <div className="mt-4 pt-3 border-t border-gray-800/60 flex items-center justify-between text-[10px]">
+                        <span className="text-emerald-400 font-bold">Auto-Managed</span>
+                        <span className="font-mono text-gray-500">Claude/GPT/Gemini</span>
+                      </div>
+                    </button>
+
+                    {/* BYOK Mode Card */}
+                    <button
+                      type="button"
+                      onClick={() => handleToggleAiMode('byok')}
+                      disabled={modeLoading}
+                      className={`p-4 rounded-2xl border text-left flex flex-col justify-between transition-all ${
+                        aiMode === 'byok'
+                          ? 'bg-violet-500/15 border-violet-500 text-white shadow-lg shadow-violet-500/10'
+                          : 'bg-gray-900/60 border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+                      }`}
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-black uppercase tracking-wider text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full border border-violet-500/20">
+                            Custom Keys
+                          </span>
+                          {aiMode === 'byok' && <CheckCircle2 size={16} className="text-violet-400" />}
+                        </div>
+                        <h4 className="text-base font-extrabold text-white">BYOK Mode</h4>
+                        <p className="text-[11px] text-gray-300 leading-relaxed">
+                          Bring Your Own Keys. Direct routing through your configured API keys (Anthropic, OpenAI, Gemini, Groq, OpenRouter) with complete cost transparency.
+                        </p>
+                      </div>
+                      <div className="mt-4 pt-3 border-t border-gray-800/60 flex items-center justify-between text-[10px]">
+                        <span className="text-violet-400 font-bold">Direct Provider</span>
+                        <span className="font-mono text-gray-500">Zero Markup</span>
+                      </div>
+                    </button>
+                  </div>
+
+                  <div className="p-3 bg-gray-950/70 border border-gray-800 rounded-xl flex items-center justify-between text-xs text-gray-400">
+                    <span>Currently Active Mode:</span>
+                    <span className="font-bold text-white uppercase">{aiMode === 'inbuilt' ? 'Inbuilt Platform AI' : 'BYOK (Your Own Keys)'}</span>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+
             {/* Knowledge Base shortcut — hidden on smallest screens */}
             <Button
               variant="secondary"
@@ -597,6 +732,36 @@ export default function Home() {
                   <DialogTitle className="text-white font-extrabold text-xl">Configure API Keys</DialogTitle>
                 </DialogHeader>
                 <div className="flex flex-col gap-4 py-4">
+                  {/* Mode Banner inside API settings */}
+                  <div className="p-3 bg-gray-900/80 rounded-2xl border border-gray-800 flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] font-bold text-gray-500 uppercase block">Active AI Mode</span>
+                      <span className="text-xs font-extrabold text-white">
+                        {aiMode === 'inbuilt' ? '✨ Inbuilt Platform AI' : '🔐 BYOK Mode (Your Own Keys)'}
+                      </span>
+                    </div>
+                    <div className="flex gap-1 bg-gray-950 p-1 rounded-xl border border-gray-800">
+                      <button
+                        type="button"
+                        onClick={() => handleToggleAiMode('inbuilt')}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                          aiMode === 'inbuilt' ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        Inbuilt
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleAiMode('byok')}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                          aiMode === 'byok' ? 'bg-violet-600 text-white' : 'text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        BYOK
+                      </button>
+                    </div>
+                  </div>
+
                   <p className="text-xs text-gray-400">
                     Select a provider and enter your API key. You can also paste keys directly into the Orchestrator chat!
                   </p>
@@ -605,6 +770,9 @@ export default function Home() {
                       <SelectValue placeholder="Select Provider" />
                     </SelectTrigger>
                     <SelectContent className="bg-gray-900 border-gray-800 text-white">
+                      <SelectItem value="openrouter">OpenRouter (Meta-Hub)</SelectItem>
+                      <SelectItem value="together">Together AI (Meta-Hub)</SelectItem>
+                      <SelectItem value="groq">Groq (Ultra-Fast)</SelectItem>
                       <SelectItem value="anthropic">Claude (Anthropic)</SelectItem>
                       <SelectItem value="openai">OpenAI</SelectItem>
                       <SelectItem value="gemini">Google Gemini</SelectItem>
@@ -705,6 +873,7 @@ export default function Home() {
               API_URL={API_URL}
               fetchWithAuth={fetchWithAuth}
               fetchData={fetchData}
+              tenantId={tenantId}
             />
           </div>
 

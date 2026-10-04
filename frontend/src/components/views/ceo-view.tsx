@@ -1,12 +1,16 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Target, Plus, Loader2, Bot, Check, Play, Zap, Sparkles } from 'lucide-react';
+import {
+  Target, Plus, Loader2, Check, Play, Zap, Sparkles,
+  Shield, AlertTriangle, Activity, BarChart3, Pause,
+  RefreshCw, XCircle, ArrowRight, Eye, CheckCircle2,
+  FileText, Users, DollarSign, Layers, ChevronRight
+} from 'lucide-react';
 
 interface CEOViewProps {
   token: string | null;
@@ -25,59 +29,109 @@ export default function CEOView({
   timeline,
   setActiveView,
 }: CEOViewProps) {
-  // CEO states relocated here
+  // Navigation & Workflow state
   const [ceoWorkflows, setCeoWorkflows] = useState<any[]>([]);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const [selectedWorkflow, setSelectedWorkflow] = useState<any | null>(null);
+
+  // Executive Vitals state
+  const [vitals, setVitals] = useState<any>({
+    active_pipelines: 0,
+    completed_pipelines: 0,
+    pending_approvals_count: 0,
+    total_budget_allocated: 0,
+    total_budget_spent: 0,
+    budget_utilization_pct: 0,
+    system_status: 'HEALTHY',
+    attention_items: []
+  });
+
+  // Strategy Formulation & Multi-Variant Plans state
   const [objectivePrompt, setObjectivePrompt] = useState('');
-  const [ceoProvider, setCeoProvider] = useState('gemini');
-  const [ceoModel, setCeoModel] = useState<string | null>(null);
-  const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
-  const [isExecutingPlan, setIsExecutingPlan] = useState(false);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [budgetCapInput, setBudgetCapInput] = useState('25000');
+  const [isCompiling, setIsCompiling] = useState(false);
+  const [availablePlans, setAvailablePlans] = useState<any[]>([]);
+  const [activeVariantTab, setActiveVariantTab] = useState<'AGGRESSIVE' | 'BALANCED' | 'CONSERVATIVE'>('BALANCED');
+  const [selectedPlanDetails, setSelectedPlanDetails] = useState<any | null>(null);
+
+  // Dry Run Simulation state
+  const [isDryRunning, setIsDryRunning] = useState(false);
+  const [dryRunResult, setDryRunResult] = useState<any | null>(null);
+  const [showDryRunModal, setShowDryRunModal] = useState(false);
+
+  // Execution & Live Stream state
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [executionProjection, setExecutionProjection] = useState<any | null>(null);
+  const [liveStreamEvents, setLiveStreamEvents] = useState<any[]>([]);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+
+  // Boardroom & Post-Mortem state
+  const [isEscalating, setIsEscalating] = useState(false);
+  const [escalationSuccess, setEscalationSuccess] = useState<string | null>(null);
+  const [postMortemBrief, setPostMortemBrief] = useState<any | null>(null);
+  const [showPostMortemModal, setShowPostMortemModal] = useState(false);
+  const [isGeneratingBrief, setIsGeneratingBrief] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const sseRef = useRef<EventSource | null>(null);
 
+  // 1. Initial Load: Fetch Vitals & Workflows
   useEffect(() => {
     if (token) {
+      fetchVitals();
       fetchCeoWorkflows();
     }
   }, [token]);
 
-  // Handle active workflow details auto-refresh when executing
+  // 2. Refresh workflow details & plan versions on selection
   useEffect(() => {
     if (selectedWorkflowId && token) {
       fetchCeoWorkflowDetails(selectedWorkflowId);
-      
-      let interval: NodeJS.Timeout | null = null;
-      if (selectedWorkflow?.status === 'executing') {
-        interval = setInterval(() => {
-          fetchCeoWorkflowDetails(selectedWorkflowId);
-        }, 5000);
-      }
-      return () => {
-        if (interval) clearInterval(interval);
-      };
+      fetchWorkflowPlans(selectedWorkflowId);
+      fetchWorkflowPostMortem(selectedWorkflowId);
     }
-  }, [selectedWorkflowId, selectedWorkflow?.status, token]);
+  }, [selectedWorkflowId, token]);
 
-  // CEO functions
-    const fetchCeoWorkflows = async () => {
-    if (!token) return;
+  // 3. Connect SSE Stream when workflow is active
+  useEffect(() => {
+    if (selectedWorkflowId && selectedWorkflow?.status === 'RUNNING') {
+      connectEventStream(selectedWorkflowId);
+    }
+    return () => {
+      if (sseRef.current) {
+        sseRef.current.close();
+      }
+    };
+  }, [selectedWorkflowId, selectedWorkflow?.status]);
+
+  const fetchVitals = async () => {
+    try {
+      const res = await fetchWithAuth(`${API_URL}/ceo/cockpit/vitals`);
+      if (res.ok) {
+        const data = await res.json();
+        setVitals(data);
+      }
+    } catch (e) {
+      console.error('Error fetching cockpit vitals:', e);
+    }
+  };
+
+  const fetchCeoWorkflows = async () => {
     try {
       const res = await fetchWithAuth(`${API_URL}/ceo/workflows`);
       if (res.ok) {
         const data = await res.json();
         setCeoWorkflows(data);
+        if (data.length > 0 && !selectedWorkflowId) {
+          setSelectedWorkflowId(data[0].id);
+        }
       }
     } catch (e) {
-      console.error(e);
+      console.error('Error fetching workflows:', e);
     }
   };
 
-
-    const fetchCeoWorkflowDetails = async (wfId: string) => {
-    if (!token) return;
+  const fetchCeoWorkflowDetails = async (wfId: string) => {
     try {
       const res = await fetchWithAuth(`${API_URL}/ceo/workflows/${wfId}`);
       if (res.ok) {
@@ -85,517 +139,803 @@ export default function CEOView({
         setSelectedWorkflow(data);
       }
     } catch (e) {
-      console.error(e);
+      console.error('Error fetching workflow details:', e);
     }
   };
 
-
-    const handleGenerateCeoPlan = async () => {
-    if (!token || !objectivePrompt.trim()) return;
-    setIsGeneratingPlan(true);
+  const fetchWorkflowPlans = async (wfId: string) => {
     try {
-      const res = await fetchWithAuth(`${API_URL}/ceo/plan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: objectivePrompt, provider: ceoProvider, model: ceoModel })
-      });
+      const res = await fetchWithAuth(`${API_URL}/ceo/plans/${wfId}`);
       if (res.ok) {
-        const data = await res.json();
-        setCeoWorkflows(prev => [data, ...prev]);
-        setSelectedWorkflowId(data.id);
-        setSelectedWorkflow(data);
-        setObjectivePrompt('');
-      } else {
-        const err = await res.json();
-        alert(`Error: ${err.detail || 'Failed to generate plan'}`);
+        const plans = await res.json();
+        setAvailablePlans(plans);
+        const match = plans.find((p: any) => p.strategy_variant === activeVariantTab) || plans[0];
+        if (match) {
+          fetchPlanDetails(wfId, match.id);
+        }
       }
     } catch (e) {
-      console.error(e);
-    } finally {
-      setIsGeneratingPlan(false);
+      console.error('Error fetching workflow plans:', e);
     }
   };
 
-
-    const handleExecuteCeoPlan = async (wfId: string) => {
-    if (!token) return;
-    setIsExecutingPlan(true);
+  const fetchPlanDetails = async (wfId: string, planVersionId: string) => {
     try {
-      const res = await fetchWithAuth(`${API_URL}/ceo/run/${wfId}`, {
+      const res = await fetchWithAuth(`${API_URL}/ceo/plans/${wfId}/${planVersionId}`);
+      if (res.ok) {
+        const details = await res.json();
+        setSelectedPlanDetails(details);
+      }
+    } catch (e) {
+      console.error('Error fetching plan details:', e);
+    }
+  };
+
+  const fetchWorkflowPostMortem = async (wfId: string) => {
+    try {
+      const res = await fetchWithAuth(`${API_URL}/ceo/workflows/${wfId}/post-mortem`);
+      if (res.ok) {
+        const data = await res.json();
+        setPostMortemBrief(data);
+      } else {
+        setPostMortemBrief(null);
+      }
+    } catch (e) {
+      setPostMortemBrief(null);
+    }
+  };
+
+  const connectEventStream = (wfId: string) => {
+    if (sseRef.current) {
+      sseRef.current.close();
+    }
+    const sse = new EventSource(`${API_URL}/ceo/workflows/${wfId}/stream`);
+    sse.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        setLiveStreamEvents((prev) => [payload, ...prev.slice(0, 49)]);
+        // Automatically sync workflow state on tick/completion
+        if (payload.event_type?.includes('workflow_') || payload.event_type?.includes('task_')) {
+          fetchCeoWorkflowDetails(wfId);
+          fetchVitals();
+        }
+      } catch (e) {
+        console.error('SSE parse error:', e);
+      }
+    };
+    sseRef.current = sse;
+  };
+
+  // Compile Multi-Plan Variants via Strategy Compiler
+  const handleCompilePlans = async () => {
+    if (!objectivePrompt.trim() || !selectedWorkflowId) return;
+    setIsCompiling(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/ceo/compiler/compile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workflow_id: selectedWorkflowId,
+          prompt: objectivePrompt,
+          budget_override: parseFloat(budgetCapInput) || undefined
+        })
+      });
+      if (res.ok) {
+        const compiledPlans = await res.json();
+        setAvailablePlans(compiledPlans);
+        const currentMatch = compiledPlans.find((p: any) => p.strategy_variant === activeVariantTab) || compiledPlans[0];
+        if (currentMatch) {
+          fetchPlanDetails(selectedWorkflowId, currentMatch.id);
+        }
+        fetchVitals();
+      }
+    } catch (e) {
+      console.error('Error compiling strategy plans:', e);
+    } finally {
+      setIsCompiling(false);
+    }
+  };
+
+  // Switch Strategy Variant Tab
+  const handleSelectVariant = (variant: 'AGGRESSIVE' | 'BALANCED' | 'CONSERVATIVE') => {
+    setActiveVariantTab(variant);
+    if (!selectedWorkflowId || availablePlans.length === 0) return;
+    const match = availablePlans.find((p: any) => p.strategy_variant === variant);
+    if (match) {
+      fetchPlanDetails(selectedWorkflowId, match.id);
+    }
+  };
+
+  // Pre-Execution Dry Run Simulation
+  const handleRunDryRun = async () => {
+    if (!selectedWorkflowId || !selectedPlanDetails) return;
+    setIsDryRunning(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/ceo/plans/${selectedWorkflowId}/${selectedPlanDetails.id}/dry-run`, {
         method: 'POST'
       });
       if (res.ok) {
-        await fetchCeoWorkflowDetails(wfId);
+        const sim = await res.json();
+        setDryRunResult(sim);
+        setShowDryRunModal(true);
       }
     } catch (e) {
-      console.error(e);
+      console.error('Dry run failed:', e);
     } finally {
-      setIsExecutingPlan(false);
+      setIsDryRunning(false);
     }
   };
 
+  // Activate Strategy Plan
+  const handleActivatePlan = async () => {
+    if (!selectedWorkflowId || !selectedPlanDetails) return;
+    try {
+      const res = await fetchWithAuth(`${API_URL}/ceo/plans/${selectedWorkflowId}/${selectedPlanDetails.id}/activate`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        fetchWorkflowPlans(selectedWorkflowId);
+        fetchCeoWorkflowDetails(selectedWorkflowId);
+      }
+    } catch (e) {
+      console.error('Error activating plan:', e);
+    }
+  };
 
+  // Workflow Execution Controls
+  const handleStartWorkflow = async () => {
+    if (!selectedWorkflowId || !selectedPlanDetails) return;
+    setIsExecuting(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/ceo/workflows/${selectedWorkflowId}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan_version_id: selectedPlanDetails.id })
+      });
+      if (res.ok) {
+        fetchCeoWorkflowDetails(selectedWorkflowId);
+        fetchVitals();
+      }
+    } catch (e) {
+      console.error('Error starting workflow:', e);
+    } finally {
+      setIsExecuting(false);
+    }
+  };
 
-  // IIFE Logic
-              // Helper component to draw curved dependency connectors
-            const GraphConnector = ({ fromId, toId, containerRef }: { fromId: string, toId: string, containerRef: { current: HTMLDivElement | null } }) => {
-              const [coords, setCoords] = useState<{ x1: number, y1: number, x2: number, y2: number } | null>(null);
+  const handleTickWorkflow = async () => {
+    if (!selectedWorkflowId || !selectedPlanDetails) return;
+    try {
+      const res = await fetchWithAuth(`${API_URL}/ceo/workflows/${selectedWorkflowId}/tick`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan_version_id: selectedPlanDetails.id })
+      });
+      if (res.ok) {
+        fetchCeoWorkflowDetails(selectedWorkflowId);
+        fetchVitals();
+      }
+    } catch (e) {
+      console.error('Error executing workflow tick:', e);
+    }
+  };
 
-              useEffect(() => {
-                const updateCoords = () => {
-                  if (!containerRef.current) return;
-                  const containerRect = containerRef.current.getBoundingClientRect();
-                  const fromEl = document.getElementById(`card-${fromId}`);
-                  const toEl = document.getElementById(`card-${toId}`);
-                  if (fromEl && toEl) {
-                    const fromRect = fromEl.getBoundingClientRect();
-                    const toRect = toEl.getBoundingClientRect();
+  const handlePauseWorkflow = async () => {
+    if (!selectedWorkflowId) return;
+    try {
+      await fetchWithAuth(`${API_URL}/ceo/workflows/${selectedWorkflowId}/pause`, { method: 'POST' });
+      fetchCeoWorkflowDetails(selectedWorkflowId);
+    } catch (e) {
+      console.error('Error pausing workflow:', e);
+    }
+  };
 
-                    setCoords({
-                      x1: fromRect.right - containerRect.left,
-                      y1: fromRect.top + fromRect.height / 2 - containerRect.top,
-                      x2: toRect.left - containerRect.left,
-                      y2: toRect.top + toRect.height / 2 - containerRect.top
-                    });
-                  }
-                };
+  const handleResumeWorkflow = async () => {
+    if (!selectedWorkflowId) return;
+    try {
+      await fetchWithAuth(`${API_URL}/ceo/workflows/${selectedWorkflowId}/resume`, { method: 'POST' });
+      fetchCeoWorkflowDetails(selectedWorkflowId);
+    } catch (e) {
+      console.error('Error resuming workflow:', e);
+    }
+  };
 
-                updateCoords();
-                window.addEventListener('resize', updateCoords);
-                const t = setTimeout(updateCoords, 300);
-                return () => {
-                  window.removeEventListener('resize', updateCoords);
-                  clearTimeout(t);
-                };
-              }, [fromId, toId, containerRef]);
+  // Escalate to Agent Boardroom
+  const handleEscalateToBoardroom = async () => {
+    if (!selectedWorkflowId || !selectedPlanDetails) return;
+    setIsEscalating(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/ceo/plans/${selectedWorkflowId}/${selectedPlanDetails.id}/escalate-to-boardroom`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setEscalationSuccess(`Escalated to Boardroom: "${data.title}"`);
+        setTimeout(() => setEscalationSuccess(null), 6000);
+      }
+    } catch (e) {
+      console.error('Error escalating to boardroom:', e);
+    } finally {
+      setIsEscalating(false);
+    }
+  };
 
-              if (!coords) return null;
+  // Generate Board-Ready Strategic Brief / Post-Mortem
+  const handleGeneratePostMortem = async () => {
+    if (!selectedWorkflowId) return;
+    setIsGeneratingBrief(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/ceo/workflows/${selectedWorkflowId}/generate-post-mortem`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        const brief = await res.json();
+        setPostMortemBrief(brief);
+        setShowPostMortemModal(true);
+      }
+    } catch (e) {
+      console.error('Error generating strategic brief:', e);
+    } finally {
+      setIsGeneratingBrief(false);
+    }
+  };
 
-              const dx = Math.abs(coords.x2 - coords.x1) * 0.5;
-              const path = `M ${coords.x1} ${coords.y1} C ${coords.x1 + dx} ${coords.y1}, ${coords.x2 - dx} ${coords.y2}, ${coords.x2} ${coords.y2}`;
+  // Active selected node for inspection drawer
+  const activeNode = useMemo(() => {
+    if (!selectedNodeId || !selectedPlanDetails?.nodes) return null;
+    return selectedPlanDetails.nodes.find((n: any) => n.id === selectedNodeId) || null;
+  }, [selectedNodeId, selectedPlanDetails]);
 
-              return (
-                <svg className="absolute inset-0 pointer-events-none w-full h-full z-0 overflow-visible">
-                  <defs>
-                    <linearGradient id={`grad-${fromId}-${toId}`} x1="0%" y1="0%" x2="100%" y2="0%">
-                      <stop offset="0%" stopColor="#8b5cf6" stopOpacity="0.4" />
-                      <stop offset="100%" stopColor="#0ea5e9" stopOpacity="0.4" />
-                    </linearGradient>
-                    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                      <path d="M 0 1 L 10 5 L 0 9 z" fill="#0ea5e9" fillOpacity="0.6" />
-                    </marker>
-                  </defs>
-                  <path
-                    d={path}
-                    fill="none"
-                    stroke={`url(#grad-${fromId}-${toId})`}
-                    strokeWidth="2"
-                    markerEnd="url(#arrow)"
-                    className="animate-dash"
-                    strokeDasharray="5, 5"
-                  />
-                </svg>
-              );
-            };
+  // Topological Level partition for DAG visualizer
+  const dagLevels = useMemo(() => {
+    if (!selectedPlanDetails?.nodes || selectedPlanDetails.nodes.length === 0) return [];
+    const nodes = selectedPlanDetails.nodes;
+    const levelMap: Record<string, number> = {};
 
-            // Compute task dependency levels/columns
-            const tasks = selectedWorkflow?.tasks || [];
-            const levels: Record<string, number> = {};
-            const parents: Record<string, string[]> = {};
-            tasks.forEach((t: any) => {
-              parents[t.id] = t.payload?.depends_on || [];
-            });
+    const getLevel = (nid: string, visited = new Set<string>()): number => {
+      if (levelMap[nid] !== undefined) return levelMap[nid];
+      if (visited.has(nid)) return 0;
+      visited.add(nid);
+      const node = nodes.find((n: any) => n.id === nid);
+      if (!node || !node.depends_on || node.depends_on.length === 0) {
+        levelMap[nid] = 0;
+        return 0;
+      }
+      const maxParent = Math.max(...node.depends_on.map((p: string) => getLevel(p, new Set(visited))));
+      levelMap[nid] = maxParent + 1;
+      return maxParent + 1;
+    };
 
-            const getLevel = (id: string, visited: Record<string, boolean> = {}): number => {
-              if (id in levels) return levels[id];
-              if (visited[id]) return 0;
-              visited[id] = true;
-              
-              const pars = parents[id] || [];
-              if (pars.length === 0) {
-                levels[id] = 0;
-              } else {
-                levels[id] = Math.max(...pars.map(pId => getLevel(pId, visited))) + 1;
-              }
-              delete visited[id];
-              return levels[id];
-            };
+    nodes.forEach((n: any) => getLevel(n.id));
+    const maxLvl = Math.max(...Object.values(levelMap), 0);
+    const levels: any[][] = Array.from({ length: maxLvl + 1 }, () => []);
 
-            tasks.forEach((t: any) => getLevel(t.id));
+    nodes.forEach((n: any) => {
+      const lvl = levelMap[n.id] || 0;
+      levels[lvl].push(n);
+    });
 
-            // Group tasks by level
-            const columns: Record<number, any[]> = {};
-            tasks.forEach((t: any) => {
-              const lvl = levels[t.id] || 0;
-              if (!columns[lvl]) columns[lvl] = [];
-              columns[lvl].push(t);
-            });
-
-            const colKeys = Object.keys(columns).map(Number).sort((a, b) => a - b);
-            const activeTask = tasks.find((t: any) => t.id === selectedTaskId);
-
-
+    return levels;
+  }, [selectedPlanDetails]);
 
   return (
-                  <div className="space-y-8 max-w-7xl mx-auto animate-in fade-in duration-300">
-                <style dangerouslySetInnerHTML={{ __html: `
-                  @keyframes borderPulse {
-                    0%, 100% { border-color: rgba(139, 92, 246, 0.2); box-shadow: 0 0 4px rgba(139, 92, 246, 0.1); }
-                    50% { border-color: rgba(14, 165, 233, 0.8); box-shadow: 0 0 12px rgba(14, 165, 233, 0.4); }
-                  }
-                  .animate-neon-pulse {
-                    animation: borderPulse 1.8s infinite ease-in-out;
-                  }
-                  @keyframes lineDash {
-                    to { stroke-dashoffset: -20; }
-                  }
-                  .animate-dash {
-                    animation: lineDash 1s infinite linear;
-                  }
-                `}} />
+    <div className="space-y-6 max-w-7xl mx-auto pb-16 font-sans text-slate-100">
+      {/* 1. Reconciled Executive Vitals Strip */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-4 shadow-sm backdrop-blur">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Active Pipelines</span>
+            <Activity className="h-4 w-4 text-sky-400" />
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-2xl font-bold text-white">{vitals.active_pipelines}</span>
+            <span className="text-xs text-slate-400">({vitals.completed_pipelines} completed)</span>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">Autonomous executive DAGs in progress</p>
+        </div>
 
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div>
-                    <h1 className="text-4xl font-extrabold text-white tracking-tight flex items-center gap-3">
-                      <Target className="text-sky-400 h-8 w-8 animate-pulse" /> CEO Workspace
-                    </h1>
-                    <p className="text-gray-400 mt-1">Autonomous DAG planning, department delegation, task execution and aggregated business reports.</p>
-                  </div>
-                </div>
+        <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-4 shadow-sm backdrop-blur">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Budget Envelope</span>
+            <DollarSign className="h-4 w-4 text-emerald-400" />
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-2xl font-bold text-white">${vitals.total_budget_spent.toLocaleString()}</span>
+            <span className="text-xs text-slate-400">/ ${vitals.total_budget_allocated.toLocaleString()}</span>
+          </div>
+          <div className="w-full bg-slate-800 rounded-full h-1.5 mt-2 overflow-hidden">
+            <div
+              className="bg-emerald-500 h-1.5 rounded-full transition-all"
+              style={{ width: `${Math.min(vitals.budget_utilization_pct, 100)}%` }}
+            />
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">{vitals.budget_utilization_pct}% authorized capital utilized</p>
+        </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-                  {/* Left Column: Form & History List */}
-                  <div className="lg:col-span-4 space-y-6">
-                    <Card className="glass-panel border-transparent rounded-3xl overflow-hidden shadow-2xl relative">
-                      <div className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-sky-500 to-transparent" />
-                      <CardHeader>
-                        <CardTitle className="text-lg text-white font-bold tracking-tight">Formulate Strategy</CardTitle>
-                        <CardDescription className="text-gray-400 text-xs">Enter your business growth objective for the CEO AI to design an execution plan.</CardDescription>
-                      </CardHeader>
-                      <CardContent className="space-y-4">
-                        <div className="flex flex-col gap-1.5">
-                          <label className="text-xs font-semibold text-gray-400">Objective</label>
-                          <Textarea
-                            placeholder="e.g. Sourcing real leads for my SaaS AI company in New York, pitch them via SMTP, and find 2 SDR recruiters."
-                            value={objectivePrompt}
-                            onChange={(e) => setObjectivePrompt(e.target.value)}
-                            className="bg-gray-900 border-gray-800 text-white rounded-xl text-xs min-h-24 focus:border-sky-500 focus:ring-sky-500/20"
-                          />
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <div className="flex flex-col gap-1.5">
-                            <label className="text-xs font-semibold text-gray-400">AI Brain</label>
-                            <Select value={ceoProvider} onValueChange={(val) => val && setCeoProvider(val)}>
-                              <SelectTrigger className="bg-gray-900 border-gray-800 text-xs text-white">
-                                <SelectValue placeholder="Provider" />
-                              </SelectTrigger>
-                              <SelectContent className="bg-gray-900 border-gray-800 text-white">
-                                <SelectItem value="gemini">Google Gemini</SelectItem>
-                                <SelectItem value="anthropic">Claude (Anthropic)</SelectItem>
-                                <SelectItem value="openai">OpenAI</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div className="flex flex-col justify-end">
-                            <Button
-                              onClick={handleGenerateCeoPlan}
-                              disabled={isGeneratingPlan || !objectivePrompt.trim()}
-                              className="bg-gradient-to-r from-sky-600 to-violet-600 hover:from-sky-500 hover:to-violet-500 text-white font-bold h-10 rounded-xl shadow-lg text-xs"
-                            >
-                              {isGeneratingPlan ? (
-                                <>
-                                  <Loader2 className="animate-spin mr-1.5" size={14} />
-                                  Designing...
-                                </>
-                              ) : 'Formulate Strategy'}
-                            </Button>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
+        <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-4 shadow-sm backdrop-blur">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Governance Gates</span>
+            <Shield className="h-4 w-4 text-amber-400" />
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-2xl font-bold text-white">{vitals.pending_approvals_count}</span>
+            <span className="text-xs text-amber-400 font-medium">Pending Approvals</span>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">Dual-Key and $R3/$R4 policy checkpoints</p>
+        </div>
 
-                    <Card className="glass-panel border-transparent rounded-3xl overflow-hidden shadow-2xl relative">
-                      <CardHeader>
-                        <CardTitle className="text-lg text-white font-bold tracking-tight">Active Pipelines</CardTitle>
-                        <CardDescription className="text-gray-400 text-xs">History of formulated growth plans.</CardDescription>
-                      </CardHeader>
-                      <CardContent className="px-2 pb-6">
-                        {ceoWorkflows.length === 0 ? (
-                          <p className="text-xs text-gray-500 text-center py-10">No growth strategy plans found. Generate one above to start.</p>
-                        ) : (
-                          <div className="flex flex-col gap-2 max-h-[350px] overflow-y-auto pr-1">
-                            {ceoWorkflows.map((w) => {
-                              const isSelected = selectedWorkflowId === w.id;
-                              const isCompleted = w.status === 'completed';
-                              return (
-                                <div
-                                  key={w.id}
-                                  onClick={() => {
-                                    setSelectedWorkflowId(w.id);
-                                    setSelectedTaskId(null);
-                                    fetchCeoWorkflowDetails(w.id);
-                                  }}
-                                  className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex flex-col gap-2 ${
-                                    isSelected
-                                      ? 'bg-[rgba(255,255,255,0.06)] border-[rgba(255,255,255,0.12)] shadow-xl'
-                                      : 'bg-transparent border-[rgba(255,255,255,0.03)] hover:bg-[rgba(255,255,255,0.02)]'
-                                  }`}
-                                >
-                                  <div className="flex items-center justify-between">
-                                    <span className={`flex items-center gap-1 text-[10px] font-bold ${
-                                      isCompleted ? 'text-emerald-400' : w.status === 'executing' ? 'text-sky-400' : 'text-amber-400'
-                                    }`}>
-                                      <span className={`h-1.5 w-1.5 rounded-full ${
-                                        isCompleted ? 'bg-emerald-400' : w.status === 'executing' ? 'bg-sky-400 animate-ping' : 'bg-amber-400'
-                                      }`} />
-                                      {w.status}
-                                    </span>
-                                    <span className="text-[9px] text-gray-500">
-                                      {new Date(w.created_at).toLocaleDateString()}
-                                    </span>
-                                  </div>
-                                  <h4 className="font-bold text-white text-xs leading-snug line-clamp-2">{w.name}</h4>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                  </div>
+        <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-4 shadow-sm backdrop-blur">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Control Plane Status</span>
+            <span className={`h-2.5 w-2.5 rounded-full ${vitals.system_status === 'HEALTHY' ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
+          </div>
+          <div className="mt-2">
+            <span className={`text-base font-bold ${vitals.system_status === 'HEALTHY' ? 'text-emerald-400' : 'text-amber-400'}`}>
+              {vitals.system_status === 'HEALTHY' ? 'Deterministic & Compliant' : 'Attention Required'}
+            </span>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">Zero unverified leakage | AST Fail-Closed</p>
+        </div>
+      </div>
 
-                  {/* Right Column: Workflow DAG visualizer & Drawer details */}
-                  <div className="lg:col-span-8 space-y-6">
-                    {!selectedWorkflow ? (
-                      <Card className="glass-panel border-transparent rounded-3xl h-[520px] flex flex-col items-center justify-center text-center p-8">
-                        <Target className="text-gray-600 h-16 w-16 mb-4 animate-bounce" />
-                        <h3 className="text-lg font-bold text-white mb-2">No Strategy Selected</h3>
-                        <p className="text-xs text-gray-400 max-w-sm">Please input a growth objective on the left panel and click 'Formulate Strategy' to generate an active execution pipeline, or select an existing one.</p>
-                      </Card>
-                    ) : (
-                      <div className="space-y-6">
-                        {/* Executive Header */}
-                        <Card className="glass-panel border-transparent rounded-3xl p-6 relative overflow-hidden">
-                          <div className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-sky-500 to-transparent" />
-                          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                            <div className="flex-1 min-w-0">
-                              <span className="text-[10px] uppercase font-bold tracking-widest text-sky-400">Target Objective</span>
-                              <h2 className="text-xl font-extrabold text-white truncate mt-0.5">{selectedWorkflow.name}</h2>
-                              {timeline.length > 0 && (
-                                <p className="text-[11px] text-gray-400 mt-1 line-clamp-1 italic">
-                                  Latest Action: {timeline[0].description}
-                                </p>
-                              )}
-                            </div>
-                            <Button
-                              onClick={() => handleExecuteCeoPlan(selectedWorkflow.id)}
-                              disabled={isExecutingPlan || selectedWorkflow.status === 'executing' || selectedWorkflow.status === 'completed'}
-                              className={`font-bold h-11 px-6 rounded-xl shadow-lg transition-all text-xs shrink-0 ${
-                                selectedWorkflow.status === 'completed'
-                                  ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 cursor-default'
-                                  : selectedWorkflow.status === 'executing'
-                                  ? 'bg-sky-600/20 text-sky-400 border border-sky-500/30'
-                                  : 'bg-gradient-to-r from-sky-600 to-blue-600 hover:from-sky-500 hover:to-blue-500 text-white shadow-sky-500/20'
-                              }`}
-                            >
-                              {selectedWorkflow.status === 'completed' ? (
-                                'Strategy Fully Executed'
-                              ) : selectedWorkflow.status === 'executing' ? (
-                                <span className="flex items-center gap-1.5">
-                                  <Loader2 className="animate-spin" size={14} />
-                                  Executing...
-                                </span>
-                              ) : 'Execute Growth Plan'}
-                            </Button>
-                          </div>
-                        </Card>
+      {escalationSuccess && (
+        <div className="bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 px-4 py-3 rounded-2xl text-xs flex items-center justify-between animate-in fade-in">
+          <span>{escalationSuccess}</span>
+          <Button size="sm" variant="ghost" onClick={() => setActiveView('boardroom')} className="text-emerald-400 font-bold hover:underline">
+            Go to Boardroom →
+          </Button>
+        </div>
+      )}
 
-                        {/* DAG Flow Visualizer */}
-                        <Card className="glass-panel border-transparent rounded-3xl p-6 relative">
-                          <span className="text-[10px] uppercase font-bold tracking-widest text-sky-400 block mb-6">Orchestration Graph (DAG)</span>
-                          
-                          <div
-                            ref={containerRef}
-                            className="relative bg-gray-950/40 border border-gray-900/60 rounded-2xl min-h-[380px] p-6 overflow-x-auto flex justify-between gap-12 items-center z-10"
-                          >
-                            {/* SVG Connectors */}
-                            {tasks.map((task: any) => {
-                              const deps = task.payload?.depends_on || [];
-                              return deps.map((parentId: string) => (
-                                <GraphConnector
-                                  key={`${parentId}-${task.id}`}
-                                  fromId={parentId}
-                                  toId={task.id}
-                                  containerRef={containerRef}
-                                />
-                              ));
-                            })}
-
-                            {/* Column nodes */}
-                            {colKeys.map((lvl) => (
-                              <div key={lvl} className="flex flex-col gap-6 items-center z-10 min-w-[150px]">
-                                <span className="text-[9px] uppercase font-bold text-gray-500 tracking-wider">Level {lvl}</span>
-                                {columns[lvl].map((task: any) => {
-                                  const isSelected = selectedTaskId === task.id;
-                                  const isCompleted = task.status === 'completed';
-                                  const isExecuting = task.status === 'in_progress';
-                                  const isFailed = task.status === 'failed';
-                                  
-                                  // Assign color configurations based on department
-                                  const dept = task.payload?.department || 'CEO';
-                                  let colorClass = 'border-gray-800 bg-gray-900/50 text-gray-400';
-                                  if (isCompleted) {
-                                    colorClass = 'border-emerald-500/40 bg-emerald-950/10 text-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.1)]';
-                                  } else if (isFailed) {
-                                    colorClass = 'border-rose-500/40 bg-rose-950/10 text-rose-400 shadow-[0_0_10px_rgba(244,63,94,0.1)]';
-                                  } else if (isExecuting) {
-                                    colorClass = 'animate-neon-pulse text-sky-400';
-                                  } else if (isSelected) {
-                                    colorClass = 'border-sky-500 bg-sky-950/20 text-white';
-                                  }
-
-                                  let badgeColor = 'bg-gray-800 text-gray-400';
-                                  if (dept === 'Marketing') badgeColor = 'bg-violet-950/40 text-violet-400 border border-violet-900/35';
-                                  else if (dept === 'Sales') badgeColor = 'bg-emerald-950/40 text-emerald-400 border border-emerald-900/35';
-                                  else if (dept === 'Finance') badgeColor = 'bg-amber-950/40 text-amber-400 border border-amber-900/35';
-                                  else if (dept === 'HR') badgeColor = 'bg-orange-950/40 text-orange-400 border border-orange-900/35';
-                                  else if (dept === 'CEO') badgeColor = 'bg-sky-950/40 text-sky-400 border border-sky-900/35';
-
-                                  return (
-                                    <div
-                                      key={task.id}
-                                      id={`card-${task.id}`}
-                                      onClick={() => setSelectedTaskId(task.id)}
-                                      className={`w-44 p-3.5 rounded-2xl border flex flex-col gap-2 cursor-pointer transition-all hover:scale-[1.03] select-none text-left relative z-20 ${colorClass}`}
-                                    >
-                                      <div className="flex items-center justify-between">
-                                        <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded ${badgeColor}`}>{dept}</span>
-                                        {isCompleted && <span className="text-emerald-400 text-[10px] font-bold">✓</span>}
-                                        {isExecuting && <span className="h-1.5 w-1.5 rounded-full bg-sky-400 animate-ping" />}
-                                        {isFailed && <span className="text-rose-500 text-[10px] font-bold">✗</span>}
-                                      </div>
-                                      <h5 className="font-bold text-xs text-white line-clamp-2 leading-tight">{task.name}</h5>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            ))}
-                          </div>
-                        </Card>
-
-                        {/* Detailed Card Report drawer */}
-                        {activeTask && (
-                          <Card className="glass-panel border-transparent rounded-3xl p-6 relative overflow-hidden transition-all duration-300">
-                            <div className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-violet-500 to-transparent" />
-                            <div className="flex justify-between items-start">
-                              <div>
-                                <span className="text-[10px] uppercase font-bold tracking-widest text-violet-400">{activeTask.payload?.department} Agent</span>
-                                <h3 className="text-lg font-bold text-white mt-0.5">{activeTask.name}</h3>
-                                <p className="text-gray-400 text-xs mt-1">{activeTask.payload?.description}</p>
-                              </div>
-                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                                activeTask.status === 'completed'
-                                  ? 'bg-emerald-950/30 border-emerald-900 text-emerald-400'
-                                  : activeTask.status === 'in_progress'
-                                  ? 'bg-sky-950/30 border-sky-900 text-sky-400'
-                                  : 'bg-gray-900/60 border-gray-800 text-gray-500'
-                              }`}>
-                                {activeTask.status}
-                              </span>
-                            </div>
-
-                            {/* Agent Results Details */}
-                            <div className="mt-6 border-t border-gray-800/80 pt-6 space-y-4">
-                              {activeTask.status !== 'completed' ? (
-                                <p className="text-xs text-gray-500 italic">This task is currently {activeTask.status}. The report will generate automatically when the preceding workflow tasks finish executing.</p>
-                              ) : (
-                                <div className="space-y-4 text-xs">
-                                  <div className="bg-gray-950/60 border border-gray-900 p-4 rounded-xl text-gray-300 leading-relaxed font-sans overflow-x-auto whitespace-pre-line">
-                                    {activeTask.result?.report}
-                                  </div>
-
-                                  {/* Render custom output summaries depending on task type */}
-                                  {activeTask.task_type === 'sales_leads' && activeTask.result?.leads && (
-                                    <div className="space-y-2.5">
-                                      <h5 className="font-bold text-white flex items-center gap-1">👥 Sourced Leads ({activeTask.result.leads.length})</h5>
-                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                        {activeTask.result.leads.map((l: any) => (
-                                          <div key={l.id} className="p-3 bg-emerald-950/10 border border-emerald-900/20 rounded-xl flex items-center justify-between">
-                                            <div>
-                                              <p className="font-bold text-white">{l.name}</p>
-                                              <p className="text-[10px] text-gray-400">{l.company} — {l.email}</p>
-                                            </div>
-                                            <button 
-                                              onClick={() => setActiveView('sales')} 
-                                              className="text-[9px] font-bold text-emerald-400 hover:underline cursor-pointer"
-                                            >
-                                              View CRM →
-                                            </button>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  )}
-
-                                  {activeTask.task_type === 'hr_source' && activeTask.result?.candidates && (
-                                    <div className="space-y-2.5">
-                                      <h5 className="font-bold text-white flex items-center gap-1">💼 Sourced Candidates ({activeTask.result.candidates.length})</h5>
-                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                        {activeTask.result.candidates.map((c: any) => (
-                                          <div key={c.id} className="p-3 bg-orange-950/10 border border-orange-900/20 rounded-xl flex items-center justify-between">
-                                            <div>
-                                              <p className="font-bold text-white">{c.name}</p>
-                                              <p className="text-[10px] text-gray-400">{c.email} — Match: {c.score}%</p>
-                                            </div>
-                                            <button 
-                                              onClick={() => setActiveView('hr')} 
-                                              className="text-[9px] font-bold text-orange-400 hover:underline cursor-pointer"
-                                            >
-                                              View HR →
-                                            </button>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  )}
-
-                                  {activeTask.task_type === 'finance_budget' && activeTask.result?.allocated_budget && (
-                                    <div className="p-3.5 bg-amber-950/10 border border-amber-900/20 rounded-xl flex items-center gap-3">
-                                      <span className="text-xl">💰</span>
-                                      <div>
-                                        <p className="font-bold text-white">Capital Allocated: ${activeTask.result.allocated_budget.toLocaleString()}</p>
-                                        <p className="text-[10px] text-gray-400">Budget lines updated in central finance registry. ROI projections calculated.</p>
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          </Card>
-                        )}
-
-                        {/* Special summary task representation at bottom */}
-                        {selectedWorkflow.status === 'completed' && (() => {
-                          const summaryTask = tasks.find((t: any) => t.task_type === 'ceo_summary');
-                          if (!summaryTask || !summaryTask.result?.report) return null;
-                          return (
-                            <Card className="glass-panel border border-sky-500/20 shadow-sky-500/5 rounded-3xl p-6 relative overflow-hidden bg-sky-950/5 animate-in slide-in-from-bottom duration-500">
-                              <div className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-sky-500 to-transparent" />
-                              <div className="flex items-center gap-2 mb-4">
-                                <Sparkles className="text-sky-400 h-5 w-5 animate-pulse" />
-                                <h3 className="text-lg font-bold text-white">CEO AI Executive Growth Report</h3>
-                              </div>
-                              <div className="bg-gray-950/40 p-5 rounded-2xl border border-gray-900 text-gray-300 leading-relaxed font-sans text-xs whitespace-pre-line">
-                                {summaryTask.result.report}
-                              </div>
-                            </Card>
-                          );
-                        })()}
-                      </div>
-                    )}
-                  </div>
-                </div>
+      {/* 2. Main Executive Cockpit Layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left Column: Directive Compiler & Strategic Variants */}
+        <div className="lg:col-span-4 space-y-6">
+          <Card className="bg-slate-900/90 border-slate-800 rounded-3xl overflow-hidden shadow-lg">
+            <CardHeader className="pb-3 border-b border-slate-800/60">
+              <div className="flex items-center gap-2">
+                <Target className="h-5 w-5 text-sky-400" />
+                <CardTitle className="text-base text-white font-bold">Strategy Compiler</CardTitle>
+              </div>
+              <CardDescription className="text-slate-400 text-xs">
+                Directives are parsed by Chief of Staff and synthesized into 3 policy-checked candidate DAGs.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4 pt-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-slate-300">Executive Directive</label>
+                <Textarea
+                  placeholder="e.g. Accelerate outbound sales pipeline to reach $100k in Q4 without hiring new SDR reps"
+                  value={objectivePrompt}
+                  onChange={(e) => setObjectivePrompt(e.target.value)}
+                  className="bg-slate-950/80 border-slate-800 text-white rounded-xl text-xs min-h-[90px] focus:border-sky-500"
+                />
               </div>
 
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-slate-300">Budget Envelope ($)</label>
+                  <Input
+                    type="number"
+                    value={budgetCapInput}
+                    onChange={(e) => setBudgetCapInput(e.target.value)}
+                    className="bg-slate-950/80 border-slate-800 text-white text-xs rounded-xl"
+                  />
+                </div>
+                <div className="flex flex-col justify-end">
+                  <Button
+                    onClick={handleCompilePlans}
+                    disabled={isCompiling || !objectivePrompt.trim()}
+                    className="bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs h-9 rounded-xl shadow transition-all"
+                  >
+                    {isCompiling ? (
+                      <>
+                        <Loader2 className="animate-spin mr-1.5 h-3.5 w-3.5" />
+                        Compiling...
+                      </>
+                    ) : (
+                      'Compile Strategies'
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Strategy Variant Scorecard */}
+          <Card className="bg-slate-900/90 border-slate-800 rounded-3xl overflow-hidden shadow-lg">
+            <CardHeader className="pb-3 border-b border-slate-800/60">
+              <CardTitle className="text-base text-white font-bold flex items-center justify-between">
+                <span>Multi-Plan Variants</span>
+                <span className="text-[10px] text-slate-400 font-normal">v{selectedPlanDetails?.version_num || 1}</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="pt-4 space-y-4">
+              {/* Variant Switcher Tabs */}
+              <div className="grid grid-cols-3 gap-1 bg-slate-950/80 p-1 rounded-xl border border-slate-800">
+                {(['AGGRESSIVE', 'BALANCED', 'CONSERVATIVE'] as const).map((variant) => (
+                  <button
+                    key={variant}
+                    onClick={() => handleSelectVariant(variant)}
+                    className={`py-1.5 text-[11px] font-bold rounded-lg transition-all ${
+                      activeVariantTab === variant
+                        ? 'bg-slate-800 text-sky-400 shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {variant === 'AGGRESSIVE' ? '🚀 Aggressive' : variant === 'BALANCED' ? '⚖️ Balanced' : '🛡️ Safe'}
+                  </button>
+                ))}
+              </div>
+
+              {selectedPlanDetails ? (
+                <div className="space-y-3">
+                  <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+                    <span className="text-[10px] uppercase font-bold text-slate-400">Objective</span>
+                    <p className="text-xs text-slate-200 line-clamp-2">{selectedPlanDetails.objective}</p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-800/80">
+                      <span className="text-[10px] text-slate-400">Estimated Budget</span>
+                      <p className="font-bold text-white text-sm mt-0.5">${Number(selectedPlanDetails.estimated_budget).toLocaleString()}</p>
+                    </div>
+                    <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-800/80">
+                      <span className="text-[10px] text-slate-400">Fragility Score</span>
+                      <p className="font-bold text-white text-sm mt-0.5">
+                        {selectedPlanDetails.red_team_critique?.fragility_score ?? 0.25}
+                        <span className="text-[10px] font-normal text-slate-400 ml-1">/ 1.0</span>
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Quant Monte Carlo Forecast Preview */}
+                  {selectedPlanDetails.quant_forecast && (
+                    <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">1,000 Monte Carlo Runs</span>
+                        <span className="text-[10px] text-emerald-400 font-bold">
+                          {Math.round((selectedPlanDetails.quant_forecast.p_target_attainment || 0.85) * 100)}% Success
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1 text-center pt-1 border-t border-slate-800/60">
+                        <div>
+                          <span className="text-[9px] text-slate-400">P10 Baseline</span>
+                          <p className="text-xs font-semibold text-slate-300">
+                            ${Math.round(selectedPlanDetails.quant_forecast.p10_outcome || 0).toLocaleString()}
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-[9px] text-sky-400 font-bold">P50 Expected</span>
+                          <p className="text-xs font-bold text-white">
+                            ${Math.round(selectedPlanDetails.quant_forecast.p50_outcome || 0).toLocaleString()}
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-[9px] text-emerald-400">P90 Upside</span>
+                          <p className="text-xs font-semibold text-slate-300">
+                            ${Math.round(selectedPlanDetails.quant_forecast.p90_outcome || 0).toLocaleString()}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action Buttons: Dry Run, Activate, Escalate */}
+                  <div className="grid grid-cols-2 gap-2 pt-2">
+                    <Button
+                      onClick={handleRunDryRun}
+                      disabled={isDryRunning}
+                      variant="outline"
+                      className="border-slate-700 bg-slate-800/50 hover:bg-slate-800 text-white font-bold text-xs h-9 rounded-xl"
+                    >
+                      {isDryRunning ? <Loader2 className="animate-spin h-3.5 w-3.5 mr-1" /> : <Eye className="h-3.5 w-3.5 mr-1" />}
+                      Dry Run Check
+                    </Button>
+                    <Button
+                      onClick={handleActivatePlan}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs h-9 rounded-xl shadow"
+                    >
+                      <Check className="h-3.5 w-3.5 mr-1" />
+                      Set Active
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="py-8 text-center text-xs text-slate-400">
+                  Select or compile a strategy to review variants.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Right Column: Interactive DAG Canvas & Real-time Live Execution */}
+        <div className="lg:col-span-8 space-y-6">
+          {/* Executive Cockpit Header & Execution Controls */}
+          <Card className="bg-slate-900/90 border-slate-800 rounded-3xl p-5 shadow-lg relative overflow-hidden">
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-sky-400 bg-sky-950/60 px-2 py-0.5 rounded border border-sky-800/50">
+                    {selectedPlanDetails?.strategy_variant || 'BALANCED'} VARIANT
+                  </span>
+                  <span className="text-[10px] text-slate-400">Status: {selectedWorkflow?.status || 'READY'}</span>
+                </div>
+                <h2 className="text-lg font-bold text-white truncate mt-1">
+                  {selectedWorkflow?.name || 'Active Executive Workflow'}
+                </h2>
+              </div>
+
+              {/* Execution Action Triggers */}
+              <div className="flex items-center gap-2 shrink-0">
+                <Button
+                  onClick={handleEscalateToBoardroom}
+                  disabled={isEscalating}
+                  variant="outline"
+                  className="border-slate-700 bg-slate-800/40 hover:bg-slate-800 text-slate-300 font-bold text-xs h-9 rounded-xl"
+                >
+                  {isEscalating ? <Loader2 className="animate-spin h-3.5 w-3.5 mr-1" /> : <Users className="h-3.5 w-3.5 mr-1" />}
+                  Boardroom Review
+                </Button>
+
+                {selectedWorkflow?.status === 'RUNNING' ? (
+                  <>
+                    <Button
+                      onClick={handleTickWorkflow}
+                      className="bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs h-9 rounded-xl shadow"
+                    >
+                      <Play className="h-3.5 w-3.5 mr-1" />
+                      Execute Tick
+                    </Button>
+                    <Button
+                      onClick={handlePauseWorkflow}
+                      variant="outline"
+                      className="border-slate-700 bg-slate-800/40 hover:bg-slate-800 text-slate-300 text-xs h-9 rounded-xl"
+                    >
+                      <Pause className="h-3.5 w-3.5" />
+                    </Button>
+                  </>
+                ) : selectedWorkflow?.status === 'COMPLETED' ? (
+                  <Button
+                    onClick={() => setShowPostMortemModal(true)}
+                    className="bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-600/30 font-bold text-xs h-9 rounded-xl"
+                  >
+                    <FileText className="h-3.5 w-3.5 mr-1" />
+                    Strategic Brief
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={handleStartWorkflow}
+                    disabled={isExecuting}
+                    className="bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs h-9 px-5 rounded-xl shadow"
+                  >
+                    {isExecuting ? <Loader2 className="animate-spin h-3.5 w-3.5 mr-1" /> : <Play className="h-3.5 w-3.5 mr-1" />}
+                    Start Execution
+                  </Button>
+                )}
+              </div>
+            </div>
+          </Card>
+
+          {/* Interactive DAG Canvas */}
+          <Card className="bg-slate-900/90 border-slate-800 rounded-3xl p-6 shadow-lg relative">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-xs uppercase font-bold tracking-wider text-slate-400">
+                Topological Execution Graph (DAG)
+              </span>
+              <span className="text-[11px] text-slate-400">
+                {selectedPlanDetails?.nodes?.length || 0} policy-checked steps
+              </span>
+            </div>
+
+            <div
+              ref={containerRef}
+              className="bg-slate-950/70 border border-slate-800/80 rounded-2xl min-h-[360px] p-6 overflow-x-auto flex justify-between gap-10 items-center"
+            >
+              {dagLevels.length === 0 ? (
+                <div className="w-full text-center py-16 text-slate-500 text-xs">
+                  No plan nodes compiled. Enter an objective and compile a strategy.
+                </div>
+              ) : (
+                dagLevels.map((lvlNodes, lvlIdx) => (
+                  <div key={lvlIdx} className="flex flex-col gap-5 items-center min-w-[170px] z-10">
+                    <span className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">
+                      Level {lvlIdx}
+                    </span>
+                    {lvlNodes.map((node: any) => {
+                      const isSelected = selectedNodeId === node.id;
+                      const isIrreversible = node.capability_id?.includes('send') || node.capability_id?.includes('allocate');
+
+                      return (
+                        <div
+                          key={node.id}
+                          onClick={() => setSelectedNodeId(node.id)}
+                          className={`w-48 p-3.5 rounded-2xl border transition-all cursor-pointer select-none text-left ${
+                            isSelected
+                              ? 'bg-slate-800 border-sky-500 shadow-md scale-[1.02]'
+                              : 'bg-slate-900/80 border-slate-800 hover:border-slate-700 hover:bg-slate-800/50'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-[8px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                              {node.department}
+                            </span>
+                            <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded ${
+                              isIrreversible ? 'bg-amber-950/60 text-amber-400 border border-amber-800/40' : 'bg-slate-800 text-slate-400'
+                            }`}>
+                              {isIrreversible ? 'R3/R4 Gate' : 'R1 Auto'}
+                            </span>
+                          </div>
+                          <h4 className="font-bold text-xs text-white leading-tight line-clamp-2">{node.name}</h4>
+                          <span className="text-[9px] text-slate-400 mt-1 block truncate">
+                            {node.capability_id}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))
+              )}
+            </div>
+          </Card>
+
+          {/* Node Inspector Drawer */}
+          {activeNode && (
+            <Card className="bg-slate-900/90 border-slate-800 rounded-3xl p-5 shadow-lg animate-in fade-in">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-sky-400">{activeNode.department} Node</span>
+                  <h3 className="text-base font-bold text-white mt-0.5">{activeNode.name}</h3>
+                </div>
+                <Button size="sm" variant="ghost" onClick={() => setSelectedNodeId(null)} className="text-slate-400 text-xs">
+                  Close
+                </Button>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 py-3 text-xs border-b border-slate-800">
+                <div>
+                  <span className="text-[10px] text-slate-400">Capability</span>
+                  <p className="font-bold text-white mt-0.5">{activeNode.capability_id}</p>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400">Version</span>
+                  <p className="font-bold text-white mt-0.5">{activeNode.capability_version || '1.0.0'}</p>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400">Estimated Duration</span>
+                  <p className="font-bold text-white mt-0.5">{activeNode.estimated_duration_seconds}s</p>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400">Compensable</span>
+                  <p className="font-bold text-white mt-0.5">{activeNode.is_compensable ? 'Yes ✓' : 'No'}</p>
+                </div>
+              </div>
+              <div className="mt-3">
+                <span className="text-[10px] uppercase font-bold text-slate-400">Canonical Node Parameters</span>
+                <pre className="bg-slate-950/80 p-3 rounded-xl border border-slate-800/80 text-[11px] text-slate-300 font-mono mt-1 overflow-x-auto">
+                  {JSON.stringify(activeNode.parameters, null, 2)}
+                </pre>
+              </div>
+            </Card>
+          )}
+
+          {/* Real-time SSE Live Event Stream */}
+          {liveStreamEvents.length > 0 && (
+            <Card className="bg-slate-900/90 border-slate-800 rounded-3xl p-5 shadow-lg">
+              <span className="text-xs uppercase font-bold tracking-wider text-slate-400 block mb-3">
+                Live Executive Event Stream (SSE)
+              </span>
+              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                {liveStreamEvents.map((evt, idx) => (
+                  <div key={idx} className="p-2.5 bg-slate-950/60 border border-slate-800/80 rounded-xl flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
+                      <span className="font-mono text-slate-300 text-[11px]">{evt.event_type}</span>
+                    </div>
+                    <span className="text-[10px] text-slate-500 font-mono">seq #{evt.sequence_num || evt.id?.slice(0, 6)}</span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+        </div>
+      </div>
+
+      {/* 3. Pre-Execution Dry Run Modal */}
+      {showDryRunModal && dryRunResult && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+          <Card className="bg-slate-900 border-slate-700 max-w-2xl w-full rounded-3xl shadow-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Shield className="h-5 w-5 text-sky-400" />
+                <h3 className="text-lg font-bold text-white">Pre-Execution Dry Run Simulation</h3>
+              </div>
+              <Button size="sm" variant="ghost" onClick={() => setShowDryRunModal(false)} className="text-slate-400">
+                ✕
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 text-xs">
+              <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800">
+                <span className="text-[10px] text-slate-400">Simulation Status</span>
+                <p className={`font-bold mt-0.5 ${dryRunResult.simulation_status === 'PASSED' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {dryRunResult.simulation_status}
+                </p>
+              </div>
+              <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800">
+                <span className="text-[10px] text-slate-400">Estimated Duration</span>
+                <p className="font-bold text-white mt-0.5">{dryRunResult.total_estimated_duration_seconds}s</p>
+              </div>
+              <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800">
+                <span className="text-[10px] text-slate-400">Estimated Cost</span>
+                <p className="font-bold text-white mt-0.5">${dryRunResult.total_estimated_cost_usd}</p>
+              </div>
+            </div>
+
+            {/* Approval Checkpoints Required */}
+            <div>
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                Required Governance Approval Checkpoints ({dryRunResult.approval_checkpoints_count})
+              </span>
+              <div className="mt-2 space-y-2">
+                {dryRunResult.approval_checkpoints.map((cp: any, idx: number) => (
+                  <div key={idx} className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl flex items-center justify-between text-xs">
+                    <div>
+                      <p className="font-bold text-white">{cp.node_name}</p>
+                      <p className="text-[10px] text-slate-400">{cp.capability_id} — {cp.side_effect_class}</p>
+                    </div>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-950/60 text-amber-400 border border-amber-800/40">
+                      {cp.required_keys === 2 ? 'Dual-Key ($R4)' : 'Single-Key ($R3)'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end gap-2 border-t border-slate-800">
+              <Button onClick={() => setShowDryRunModal(false)} variant="outline" className="border-slate-700 text-xs">
+                Dismiss
+              </Button>
+              <Button
+                onClick={() => {
+                  setShowDryRunModal(false);
+                  handleActivatePlan();
+                }}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs"
+              >
+                Approve & Activate Plan
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* 4. Strategic Brief & Post-Mortem Modal */}
+      {showPostMortemModal && postMortemBrief && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+          <Card className="bg-slate-900 border-slate-700 max-w-3xl w-full rounded-3xl shadow-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <FileText className="h-5 w-5 text-emerald-400" />
+                <h3 className="text-lg font-bold text-white">Boardroom Strategic Brief & Post-Mortem</h3>
+              </div>
+              <Button size="sm" variant="ghost" onClick={() => setShowPostMortemModal(false)} className="text-slate-400">
+                ✕
+              </Button>
+            </div>
+
+            <div className="bg-slate-950/80 p-5 rounded-2xl border border-slate-800 text-slate-300 text-xs whitespace-pre-line leading-relaxed font-sans">
+              {postMortemBrief.executive_brief_markdown}
+            </div>
+
+            <div className="pt-2 flex justify-end gap-2 border-t border-slate-800">
+              <Button onClick={() => setShowPostMortemModal(false)} className="bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold">
+                Close Brief
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
   );
 }
